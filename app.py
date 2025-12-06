@@ -166,9 +166,6 @@ class UserSearchResponse(BaseModel):
     query: str
     total_results: int
     users: List[UserSearchResult]
-    failed_accounts: int
-    results: List[BatchScrapeItem]
-    completed_at: str
 
 
 @app.get("/")

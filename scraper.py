@@ -64,7 +64,8 @@ async def search_threads_users(
     Returns:
         사용자 정보 리스트 (검색어 매칭 우선순위로 정렬됨)
     """
-    search_url = f"{THREADS_BASE_URL}/search?q={query}&serp_type=default"
+    # serp_type=accounts로 사용자 검색 탭 사용
+    search_url = f"{THREADS_BASE_URL}/search?q={query}&serp_type=accounts"
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -77,6 +78,7 @@ async def search_threads_users(
             results: List[Dict[str, Any]] = []
             seen_usernames: set[str] = set()
             
+            # 사용자 프로필 링크 찾기
             profile_links = await page.query_selector_all("a[href^='/@']")
             
             for link in profile_links:
@@ -106,6 +108,29 @@ async def search_threads_users(
                     "profile_url": f"{THREADS_BASE_URL}/@{username}",
                 })
                 seen_usernames.add(username)
+            
+            # 검색 결과가 없거나, 쿼리가 정확한 username처럼 보이면 직접 프로필 확인
+            query_clean = query.strip().lstrip("@")
+            if not any(r["username"].lower() == query_clean.lower() for r in results):
+                # 직접 프로필 페이지 확인
+                try:
+                    profile_url = f"{THREADS_BASE_URL}/@{query_clean}"
+                    await page.goto(profile_url, wait_until="networkidle", timeout=10000)
+                    
+                    # 프로필이 존재하는지 확인 (404가 아닌 경우)
+                    title = await page.title()
+                    if "Page not found" not in title and query_clean.lower() not in [r["username"].lower() for r in results]:
+                        # display_name 추출 시도
+                        name_el = await page.query_selector("h1, [data-testid='user-name']")
+                        display_name = await name_el.inner_text() if name_el else query_clean
+                        
+                        results.insert(0, {
+                            "username": query_clean,
+                            "display_name": display_name.split("\n")[0].strip() if display_name else query_clean,
+                            "profile_url": profile_url,
+                        })
+                except Exception:
+                    pass  # 프로필 확인 실패는 무시
             
             # 검색어 매칭 우선순위로 정렬
             results.sort(key=lambda r: _match_score(query, r["username"], r["display_name"]))

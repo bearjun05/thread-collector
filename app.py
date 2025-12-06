@@ -152,6 +152,9 @@ class BatchScrapeResponse(BaseModel):
     """배치 스크래핑 응답 모델"""
     total_accounts: int
     successful_accounts: int
+    failed_accounts: int
+    results: List[BatchScrapeItem]
+    completed_at: str
 
 
 class UserSearchResult(BaseModel):

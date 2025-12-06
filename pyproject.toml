@@ -1,0 +1,12 @@
+[project]
+name = "thread-collector"
+version = "0.1.0"
+description = "Threads profile scraper API server"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.48.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+]

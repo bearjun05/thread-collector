@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.venv/
+venv/
+ENV/
+.env
+
+# project artifacts
+outputs/
+debug_threads.png
+*.log
+
+# packaging
+dist/
+build/
+*.egg-info/
+
+# editor/OS
+.DS_Store
+.vscode/
+.idea/
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv

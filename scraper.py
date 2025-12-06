@@ -23,6 +23,34 @@ def _normalize_post_url(url: str) -> str:
     return url
 
 
+def _match_score(query: str, username: str, display_name: str) -> int:
+    """검색어 매칭 점수 계산 (낮을수록 우선순위 높음)
+    
+    우선순위:
+    0: username이 검색어와 정확히 일치
+    1: username이 검색어로 시작
+    2: display_name이 검색어로 시작
+    3: username에 검색어 포함
+    4: display_name에 검색어 포함
+    5: 기타
+    """
+    q = query.lower()
+    u = username.lower()
+    d = display_name.lower()
+    
+    if u == q:
+        return 0
+    if u.startswith(q):
+        return 1
+    if d.startswith(q):
+        return 2
+    if q in u:
+        return 3
+    if q in d:
+        return 4
+    return 5
+
+
 async def search_threads_users(
     query: str,
     max_results: int = 10,
@@ -34,7 +62,7 @@ async def search_threads_users(
         max_results: 최대 결과 수 (기본값: 10)
     
     Returns:
-        사용자 정보 리스트: [{"username": "...", "display_name": "...", "profile_url": "..."}]
+        사용자 정보 리스트 (검색어 매칭 우선순위로 정렬됨)
     """
     search_url = f"{THREADS_BASE_URL}/search?q={query}&serp_type=default"
     
@@ -52,9 +80,6 @@ async def search_threads_users(
             profile_links = await page.query_selector_all("a[href^='/@']")
             
             for link in profile_links:
-                if len(results) >= max_results:
-                    break
-                
                 href = await link.get_attribute("href")
                 if not href or "/post/" in href:
                     continue
@@ -82,7 +107,10 @@ async def search_threads_users(
                 })
                 seen_usernames.add(username)
             
-            return results
+            # 검색어 매칭 우선순위로 정렬
+            results.sort(key=lambda r: _match_score(query, r["username"], r["display_name"]))
+            
+            return results[:max_results]
         except Exception as e:
             print(f"검색 오류: {e}")
             return []

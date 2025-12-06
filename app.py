@@ -1,6 +1,6 @@
 """Threads 스크래퍼 API 서버"""
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -27,6 +27,13 @@ def parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def make_aware(dt: datetime) -> datetime:
+    """datetime을 timezone-aware로 변환 (UTC 기준)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def filter_posts_by_date(
     posts: List[Dict[str, Any]],
     since_days: Optional[int] = None,
@@ -42,14 +49,14 @@ def filter_posts_by_date(
     if not since_days and not since_date:
         return posts
     
-    # 기준 날짜 계산
+    # 기준 날짜 계산 (UTC 기준)
     if since_days:
-        cutoff = datetime.now() - timedelta(days=since_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
     elif since_date:
         parsed = parse_datetime(since_date)
         if not parsed:
             return posts  # 파싱 실패 시 필터링 없이 반환
-        cutoff = parsed
+        cutoff = make_aware(parsed)
     else:
         return posts
     
@@ -59,8 +66,11 @@ def filter_posts_by_date(
         if created_at is None:
             # 날짜 정보 없으면 포함 (보수적 처리)
             filtered.append(post)
-        elif created_at >= cutoff:
-            filtered.append(post)
+        else:
+            # 양쪽 모두 timezone-aware로 변환 후 비교
+            created_at_aware = make_aware(created_at)
+            if created_at_aware >= cutoff:
+                filtered.append(post)
     
     return filtered
 

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dateutil import parser as date_parser
 
-from scraper import scrape_threads_profile
+from scraper import scrape_threads_profile, search_threads_users
 
 # UTC 표준 시간대 (클라이언트에서 로컬 시간으로 변환)
 UTC = timezone.utc
@@ -152,6 +152,20 @@ class BatchScrapeResponse(BaseModel):
     """배치 스크래핑 응답 모델"""
     total_accounts: int
     successful_accounts: int
+
+
+class UserSearchResult(BaseModel):
+    """사용자 검색 결과 항목"""
+    username: str
+    display_name: str
+    profile_url: str
+
+
+class UserSearchResponse(BaseModel):
+    """사용자 검색 응답 모델"""
+    query: str
+    total_results: int
+    users: List[UserSearchResult]
     failed_accounts: int
     results: List[BatchScrapeItem]
     completed_at: str
@@ -164,6 +178,7 @@ async def root():
         "message": "Threads Collector API",
         "version": "0.1.0",
         "endpoints": {
+            "GET /search-users": "사용자 검색 (자동완성) - 검색어로 Threads 사용자 찾기",
             "GET /scrape": "외부 사용자용 - 쿼리 파라미터로 사용자명을 받아 스크래핑",
             "POST /scrape": "외부 사용자용 - JSON body로 사용자명과 옵션을 받아 스크래핑",
             "POST /internal/batch-scrape": "내부 사용자용 - 계정 리스트를 받아 배치 스크래핑",
@@ -180,6 +195,31 @@ async def root():
 async def health():
     """서버 상태 확인"""
     return {"status": "healthy"}
+
+
+@app.get("/search-users", response_model=UserSearchResponse)
+async def search_users(
+    q: str = Query(..., description="검색어 (예: 'cat', 'zuck')", min_length=1),
+    max_results: int = Query(10, description="최대 결과 수", ge=1, le=50),
+):
+    """Threads 사용자 검색 (자동완성용)
+    
+    검색어를 입력하면 매칭되는 Threads 사용자 목록을 반환합니다.
+    
+    예시:
+    - GET /search-users?q=cat  → cheese.cat.ai 등 검색
+    - GET /search-users?q=zuck&max_results=5
+    """
+    try:
+        users = await search_threads_users(query=q, max_results=max_results)
+        
+        return UserSearchResponse(
+            query=q,
+            total_results=len(users),
+            users=[UserSearchResult(**user) for user in users],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"사용자 검색 중 오류 발생: {str(e)}")
 
 
 @app.get("/scrape", response_model=ScrapeResponse)

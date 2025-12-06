@@ -66,12 +66,23 @@ def filter_posts_by_date(
 
 
 class ScrapeRequest(BaseModel):
-    """스크래핑 요청 모델"""
-    username: str = Field(..., description="Threads 사용자명 (예: 'zuck', '@' 없이 입력)")
-    max_posts: Optional[int] = Field(None, description="최대 수집할 게시물 수 (None이면 제한 없음)")
-    max_scroll_rounds: int = Field(50, description="최대 스크롤 라운드 수", ge=1, le=200)
-    since_days: Optional[int] = Field(None, description="최근 N일 이내 게시물만 (예: 7=일주일, 30=한달)", ge=1, le=365)
-    since_date: Optional[str] = Field(None, description="특정 날짜 이후 게시물만 (ISO 형식, 예: '2024-01-01')")
+    """스크래핑 요청 모델 (외부 사용자용)"""
+    username: str = Field(..., description="Threads 사용자명 (예: 'zuck', '@' 없이 입력)", json_schema_extra={"example": "zuck"})
+    max_posts: Optional[int] = Field(None, description="최대 수집할 게시물 수 (미지정시 전체)", json_schema_extra={"example": 10})
+    since_days: Optional[int] = Field(None, description="최근 N일 이내 게시물만 (예: 7=일주일, 30=한달)", ge=1, le=365, json_schema_extra={"example": 7})
+    since_date: Optional[str] = Field(None, description="특정 날짜 이후 게시물만 (ISO 형식, 예: '2024-12-01')", json_schema_extra={"example": "2024-12-01"})
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "username": "zuck",
+                    "max_posts": 10,
+                    "since_days": 7
+                }
+            ]
+        }
+    }
 
 
 class PostResponse(BaseModel):
@@ -98,6 +109,18 @@ class BatchScrapeRequest(BaseModel):
     max_scroll_rounds: int = Field(50, description="각 계정당 최대 스크롤 라운드 수", ge=1, le=200)
     since_days: Optional[int] = Field(None, description="최근 N일 이내 게시물만", ge=1, le=365)
     since_date: Optional[str] = Field(None, description="특정 날짜 이후 게시물만 (ISO 형식)")
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "usernames": ["zuck", "meta", "instagram"],
+                    "max_posts": 10,
+                    "since_days": 7
+                }
+            ]
+        }
+    }
 
 
 class BatchScrapeItem(BaseModel):
@@ -149,12 +172,11 @@ async def health():
 @app.get("/scrape", response_model=ScrapeResponse)
 async def scrape_get(
     username: str = Query(..., description="Threads 사용자명 (예: 'zuck')"),
-    max_posts: Optional[int] = Query(None, description="최대 수집할 게시물 수"),
-    max_scroll_rounds: int = Query(50, description="최대 스크롤 라운드 수", ge=1, le=200),
-    since_days: Optional[int] = Query(None, description="최근 N일 이내 게시물만 (예: 7=일주일)", ge=1, le=365),
-    since_date: Optional[str] = Query(None, description="특정 날짜 이후 게시물만 (ISO 형식)"),
+    max_posts: Optional[int] = Query(None, description="최대 수집할 게시물 수 (미지정시 전체)"),
+    since_days: Optional[int] = Query(None, description="최근 N일 이내 게시물만 (예: 7=일주일, 30=한달)", ge=1, le=365),
+    since_date: Optional[str] = Query(None, description="특정 날짜 이후 게시물만 (ISO 형식, 예: '2024-12-01')"),
 ):
-    """GET 방식으로 스크래핑 요청
+    """GET 방식으로 스크래핑 요청 (외부 사용자용)
     
     예시: 
     - GET /scrape?username=zuck&max_posts=10
@@ -170,7 +192,7 @@ async def scrape_get(
         posts = await scrape_threads_profile(
             username=username,
             max_posts=max_posts,
-            max_scroll_rounds=max_scroll_rounds,
+            max_scroll_rounds=200,  # 내부적으로 충분히 높은 값 사용
         )
         
         total_before_filter = len(posts)
@@ -219,7 +241,7 @@ async def scrape_post(request: ScrapeRequest):
         posts = await scrape_threads_profile(
             username=username,
             max_posts=request.max_posts,
-            max_scroll_rounds=request.max_scroll_rounds,
+            max_scroll_rounds=200,  # 내부적으로 충분히 높은 값 사용
         )
         
         total_before_filter = len(posts)

@@ -83,8 +83,7 @@ curl "http://localhost:8001/scrape?username=zuck&since_date=2024-12-01"
 | 파라미터 | 필수 | 설명 |
 |---------|-----|------|
 | `username` | ✅ | Threads 사용자명 (예: "zuck", "@" 기호 없이 입력) |
-| `max_posts` | ❌ | 최대 수집할 게시물 수 |
-| `max_scroll_rounds` | ❌ | 최대 스크롤 라운드 수 (기본값: 50, 최대: 200) |
+| `max_posts` | ❌ | 최대 수집할 게시물 수 (미지정시 전체) |
 | `since_days` | ❌ | 최근 N일 이내 게시물만 (예: 7=일주일, 30=한달) |
 | `since_date` | ❌ | 특정 날짜 이후 게시물만 (ISO 형식, 예: "2024-12-01") |
 
@@ -110,9 +109,7 @@ curl -X POST "http://localhost:8001/scrape" \
 {
   "username": "zuck",
   "max_posts": 10,
-  "max_scroll_rounds": 50,
-  "since_days": 7,
-  "since_date": null
+  "since_days": 7
 }
 ```
 

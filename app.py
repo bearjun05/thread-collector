@@ -10,6 +10,9 @@ from dateutil import parser as date_parser
 
 from scraper import scrape_threads_profile
 
+# UTC 표준 시간대 (클라이언트에서 로컬 시간으로 변환)
+UTC = timezone.utc
+
 app = FastAPI(
     title="Threads Collector API",
     description="Threads 프로필 게시물을 스크래핑하는 API 서버",
@@ -222,7 +225,7 @@ async def scrape_get(
             total_posts=total_before_filter,
             filtered_posts=len(filtered_posts),
             posts=[PostResponse(**post) for post in filtered_posts],
-            scraped_at=datetime.now().isoformat(),
+            scraped_at=datetime.now(UTC).isoformat(),
             filter_applied=filter_desc,
         )
     except Exception as e:
@@ -271,7 +274,7 @@ async def scrape_post(request: ScrapeRequest):
             total_posts=total_before_filter,
             filtered_posts=len(filtered_posts),
             posts=[PostResponse(**post) for post in filtered_posts],
-            scraped_at=datetime.now().isoformat(),
+            scraped_at=datetime.now(UTC).isoformat(),
             filter_applied=filter_desc,
         )
     except Exception as e:
@@ -287,7 +290,7 @@ async def scrape_single_account(
 ) -> BatchScrapeItem:
     """단일 계정 스크래핑 헬퍼 함수"""
     username = username.lstrip("@")
-    scraped_at = datetime.now().isoformat()
+    scraped_at = datetime.now(UTC).isoformat()
     
     try:
         if not username:
@@ -384,7 +387,7 @@ async def batch_scrape(request: BatchScrapeRequest):
             successful_accounts=successful_count,
             failed_accounts=failed_count,
             results=results,
-            completed_at=datetime.now().isoformat(),
+            completed_at=datetime.now(UTC).isoformat(),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"배치 스크래핑 중 오류 발생: {str(e)}")

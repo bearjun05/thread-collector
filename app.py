@@ -536,34 +536,30 @@ async def scrape_get(
         if not username:
             raise HTTPException(status_code=400, detail="사용자명이 필요합니다")
         
-        # 답글 포함 여부에 따라 다른 함수 사용
-        if include_replies:
-            posts = await scrape_threads_profile_with_replies(
-                username=username,
-                max_posts=None,  # 프로필 게시물은 제한 없음
-                include_replies=True,
-                max_reply_depth=max_reply_depth,
-                max_total_posts=max_total_posts,
-            )
-        else:
-            posts = await scrape_threads_profile(
-                username=username,
-                max_posts=None,  # 제한 없음
-                max_scroll_rounds=200,
-            )
+        # 1단계: 프로필에서 게시물 목록 먼저 수집 (날짜 정보 포함)
+        profile_posts = await scrape_threads_profile(
+            username=username,
+            max_posts=None,  # 제한 없음
+            max_scroll_rounds=200,
+        )
         
-        total_before_filter = len(posts)
+        total_before_filter = len(profile_posts)
+        print(f"[API] 프로필에서 수집된 게시물: {total_before_filter}개")
         
-        # 날짜 필터 적용 (since_date가 있으면 우선)
+        # 2단계: 날짜 필터 적용 (since_date가 있으면 우선)
         if since_date:
-            filtered_posts = filter_posts_by_date(posts, since_date=since_date)
+            filtered_posts = filter_posts_by_date(profile_posts, since_date=since_date)
             filter_desc = f"{since_date} 이후"
         else:
-            filtered_posts = filter_posts_by_date(posts, since_days=since_days)
+            filtered_posts = filter_posts_by_date(profile_posts, since_days=since_days)
             filter_desc = f"최근 {since_days}일 이내"
         
-        # 답글 포함 시 ThreadWithRepliesResponse 반환
+        print(f"[API] 날짜 필터링 후: {len(filtered_posts)}개 ({filter_desc})")
+        
+        # 3단계: 답글 포함 시 필터링된 게시물에 대해서만 답글 수집
         if include_replies:
+            import asyncio as _asyncio
+            
             def convert_replies(replies: List[Dict]) -> List[ReplyPost]:
                 result = []
                 for r in replies:
@@ -578,17 +574,69 @@ async def scrape_get(
                 return result
             
             thread_responses = []
-            for post in filtered_posts:
-                thread_responses.append(ThreadWithRepliesResponse(
-                    post_id=post.get("post_id"),
-                    text=post.get("text", ""),
-                    created_at=post.get("created_at"),
-                    url=post.get("url", ""),
-                    author=post.get("author"),
-                    replies=convert_replies(post.get("replies", [])),
-                    total_replies_count=post.get("total_replies_count", 0),
-                    scraped_at=datetime.now(KST).isoformat(),
-                ))
+            total_collected = 0
+            
+            for i, post in enumerate(filtered_posts):
+                # 최대 게시물 수 도달 시 중단
+                if total_collected >= max_total_posts:
+                    print(f"[API] 최대 게시물 수({max_total_posts}) 도달, 수집 중단")
+                    break
+                
+                post_url = post.get("url", "")
+                if not post_url:
+                    continue
+                
+                print(f"[API] 답글 수집 중: {i+1}/{len(filtered_posts)} - {post_url}")
+                
+                try:
+                    # 남은 수집 가능 개수 계산
+                    remaining = max_total_posts - total_collected
+                    
+                    thread_data = await scrape_thread_with_replies(
+                        post_url=post_url,
+                        max_depth=max_reply_depth,
+                        max_total_posts=remaining,
+                    )
+                    
+                    # 원본 created_at 유지 (프로필에서 가져온 정확한 날짜)
+                    thread_data["created_at"] = post.get("created_at")
+                    
+                    replies_count = len(thread_data.get("replies", []))
+                    thread_total = 1 + replies_count
+                    total_collected += thread_total
+                    
+                    thread_responses.append(ThreadWithRepliesResponse(
+                        post_id=thread_data.get("post_id"),
+                        text=thread_data.get("text", ""),
+                        created_at=thread_data.get("created_at"),
+                        url=thread_data.get("url", ""),
+                        author=thread_data.get("author"),
+                        replies=convert_replies(thread_data.get("replies", [])),
+                        total_replies_count=thread_data.get("total_replies_count", 0),
+                        scraped_at=datetime.now(KST).isoformat(),
+                    ))
+                    
+                    print(f"[API] 스레드 수집 완료: root 1개 + 답글 {replies_count}개 (누적 {total_collected}개)")
+                    
+                except Exception as e:
+                    print(f"[API] 답글 수집 실패: {e}")
+                    # 답글 수집 실패 시 원본 게시물만 추가
+                    thread_responses.append(ThreadWithRepliesResponse(
+                        post_id=None,
+                        text=post.get("text", ""),
+                        created_at=post.get("created_at"),
+                        url=post_url,
+                        author=None,
+                        replies=[],
+                        total_replies_count=0,
+                        scraped_at=datetime.now(KST).isoformat(),
+                    ))
+                    total_collected += 1
+                
+                # 요청 간 간격 (rate limiting 방지)
+                await _asyncio.sleep(2)
+            
+            print(f"[API] 전체 수집 완료: 총 {total_collected}개 게시물")
             
             return ScrapeWithRepliesResponse(
                 username=username,

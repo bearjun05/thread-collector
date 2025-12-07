@@ -13,7 +13,7 @@ async def main() -> None:
     - 환경변수 THREADS_USERNAME_TARGET 에서 스크래핑할 프로필 이름을 읽습니다.
       (예: 'zuck' 처럼 @를 뺀 유저명)
     """
-    username = os.getenv("THREADS_USERNAME_TARGET", "cheese.cat.ai")
+    username = os.getenv("THREADS_USERNAME_TARGET", "choi.openai")
 
     print(f"Threads 프로필 @{username} 에서 게시물 가져오는 중...")
     # max_posts 를 None 으로 두면 스크롤이 멈출 때까지 가능한 한 많이 가져옵니다.

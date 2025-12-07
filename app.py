@@ -16,7 +16,8 @@ from scraper import (
     scrape_threads_profile_with_replies,
 )
 
-# UTC 표준 시간대 (클라이언트에서 로컬 시간으로 변환)
+# 한국 표준 시간대 (KST = UTC+9)
+KST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 
 app = FastAPI(
@@ -48,7 +49,7 @@ def filter_posts_by_date(
     since_days: Optional[int] = None,
     since_date: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """게시물을 날짜 기준으로 필터링.
+    """게시물을 날짜 기준으로 필터링 (한국 시간 KST 기준).
     
     Args:
         posts: 게시물 리스트
@@ -58,14 +59,21 @@ def filter_posts_by_date(
     if not since_days and not since_date:
         return posts
     
-    # 기준 날짜 계산 (UTC 기준)
+    # 기준 날짜 계산 (한국 시간 KST 기준)
+    now_kst = datetime.now(KST)
+    
     if since_days:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+        # 한국 시간 기준으로 N일 전 자정부터
+        cutoff_kst = now_kst.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=since_days - 1)
+        cutoff = cutoff_kst.astimezone(UTC)  # UTC로 변환하여 비교
     elif since_date:
         parsed = parse_datetime(since_date)
         if not parsed:
             return posts  # 파싱 실패 시 필터링 없이 반환
-        cutoff = make_aware(parsed)
+        # 입력된 날짜를 한국 시간으로 해석
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=KST)
+        cutoff = parsed.astimezone(UTC)
     else:
         return posts
     
@@ -76,7 +84,7 @@ def filter_posts_by_date(
             # 날짜 정보 없으면 포함 (보수적 처리)
             filtered.append(post)
         else:
-            # 양쪽 모두 timezone-aware로 변환 후 비교
+            # UTC로 변환하여 비교
             created_at_aware = make_aware(created_at)
             if created_at_aware >= cutoff:
                 filtered.append(post)
@@ -331,7 +339,7 @@ async def scrape_thread_get(
             author=thread_data.get("author"),
             replies=convert_replies(thread_data.get("replies", [])),
             total_replies_count=thread_data.get("total_replies_count", 0),
-            scraped_at=datetime.now(UTC).isoformat(),
+            scraped_at=datetime.now(KST).isoformat(),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -383,7 +391,7 @@ async def scrape_thread_post(request: ScrapeThreadRequest):
             author=thread_data.get("author"),
             replies=convert_replies(thread_data.get("replies", [])),
             total_replies_count=thread_data.get("total_replies_count", 0),
-            scraped_at=datetime.now(UTC).isoformat(),
+            scraped_at=datetime.now(KST).isoformat(),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -458,14 +466,14 @@ async def scrape_profile_with_replies(request: ScrapeWithRepliesRequest):
                 author=post.get("author"),
                 replies=convert_replies(post.get("replies", [])),
                 total_replies_count=post.get("total_replies_count", 0),
-                scraped_at=datetime.now(UTC).isoformat(),
+                scraped_at=datetime.now(KST).isoformat(),
             ))
         
         return ScrapeWithRepliesResponse(
             username=username,
             total_posts=len(thread_responses),
             posts=thread_responses,
-            scraped_at=datetime.now(UTC).isoformat(),
+            scraped_at=datetime.now(KST).isoformat(),
             filter_applied=filter_desc,
         )
     except HTTPException:
@@ -579,14 +587,14 @@ async def scrape_get(
                     author=post.get("author"),
                     replies=convert_replies(post.get("replies", [])),
                     total_replies_count=post.get("total_replies_count", 0),
-                    scraped_at=datetime.now(UTC).isoformat(),
+                    scraped_at=datetime.now(KST).isoformat(),
                 ))
             
             return ScrapeWithRepliesResponse(
                 username=username,
                 total_posts=len(thread_responses),
                 posts=thread_responses,
-                scraped_at=datetime.now(UTC).isoformat(),
+                scraped_at=datetime.now(KST).isoformat(),
                 filter_applied=filter_desc,
             )
         else:
@@ -609,7 +617,7 @@ async def scrape_get(
                 total_posts=total_before_filter,
                 filtered_posts=len(post_responses),
                 posts=post_responses,
-                scraped_at=datetime.now(UTC).isoformat(),
+                scraped_at=datetime.now(KST).isoformat(),
                 filter_applied=filter_desc,
             )
     except HTTPException:
@@ -681,7 +689,7 @@ async def scrape_post(request: ScrapeRequest):
             total_posts=total_before_filter,
             filtered_posts=len(post_responses),
             posts=post_responses,
-            scraped_at=datetime.now(UTC).isoformat(),
+            scraped_at=datetime.now(KST).isoformat(),
             filter_applied=filter_desc,
         )
     except HTTPException:
@@ -702,7 +710,7 @@ async def scrape_single_account(
 ) -> BatchScrapeItem:
     """단일 계정 스크래핑 헬퍼 함수"""
     username = username.lstrip("@")
-    scraped_at = datetime.now(UTC).isoformat()
+    scraped_at = datetime.now(KST).isoformat()
     
     try:
         if not username:
@@ -817,7 +825,7 @@ async def batch_scrape(request: BatchScrapeRequest):
             successful_accounts=successful_count,
             failed_accounts=failed_count,
             results=results,
-            completed_at=datetime.now(UTC).isoformat(),
+            completed_at=datetime.now(KST).isoformat(),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"배치 스크래핑 중 오류 발생: {str(e)}")

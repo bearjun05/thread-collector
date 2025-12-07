@@ -213,6 +213,11 @@ async def scrape_threads_profile(
         results: List[Dict[str, Any]] = []
         seen_post_ids: set[str] = set()
         last_count = 0
+        no_new_posts_count = 0  # 연속으로 새 게시물이 없는 횟수
+        
+        # 최소 스크롤 보장 (pinned 게시물 때문에 최신 게시물이 아래에 있을 수 있음)
+        MIN_SCROLL_ROUNDS = 5
+        MAX_NO_NEW_POSTS = 3  # 연속 3번 새 게시물 없으면 중단
 
         for scroll_round in range(max_scroll_rounds):
             candidates = await page.query_selector_all(post_selector)
@@ -254,14 +259,22 @@ async def scrape_threads_profile(
             if max_posts is not None and len(results) >= max_posts:
                 break
 
+            # 스크롤 중단 조건 개선: 최소 스크롤 보장 + 연속 N번 새 게시물 없을 때만 중단
             if len(results) == last_count:
-                break
+                no_new_posts_count += 1
+                # 최소 스크롤 횟수 이후, 연속으로 새 게시물이 없으면 중단
+                if scroll_round >= MIN_SCROLL_ROUNDS and no_new_posts_count >= MAX_NO_NEW_POSTS:
+                    print(f"[scraper] 스크롤 중단: {scroll_round+1}회 스크롤 후 연속 {no_new_posts_count}번 새 게시물 없음")
+                    break
+            else:
+                no_new_posts_count = 0  # 새 게시물 발견 시 카운터 리셋
 
             last_count = len(results)
 
             await page.mouse.wheel(0, 2500)
             await page.wait_for_timeout(1200)
 
+        print(f"[scraper] 프로필 스크래핑 완료: {len(results)}개 게시물 수집")
         await browser.close()
 
     return results

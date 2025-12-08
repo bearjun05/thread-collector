@@ -63,9 +63,10 @@ def filter_posts_by_date(
     now_kst = datetime.now(KST)
     
     if since_days:
-        # 한국 시간 기준으로 N일 전 자정부터
-        cutoff_kst = now_kst.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=since_days - 1)
-        cutoff = cutoff_kst.astimezone(UTC)  # UTC로 변환하여 비교
+        # 현재 시간 기준으로 N*24시간 전부터 (더 직관적인 방식)
+        cutoff = datetime.now(UTC) - timedelta(days=since_days)
+        print(f"[filter] 현재 KST: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"[filter] cutoff UTC: {cutoff.strftime('%Y-%m-%d %H:%M:%S')} (since_days={since_days})")
     elif since_date:
         parsed = parse_datetime(since_date)
         if not parsed:
@@ -78,17 +79,25 @@ def filter_posts_by_date(
         return posts
     
     filtered = []
-    for post in posts:
+    for i, post in enumerate(posts):
         created_at = parse_datetime(post.get("created_at"))
+        url = post.get("url", "")
+        post_id = url.split("/post/")[-1] if "/post/" in url else f"post_{i}"
+        
         if created_at is None:
             # 날짜 정보 없으면 포함 (보수적 처리)
             filtered.append(post)
+            print(f"[filter] {post_id}: created_at=None → 포함")
         else:
             # UTC로 변환하여 비교
             created_at_aware = make_aware(created_at)
             if created_at_aware >= cutoff:
                 filtered.append(post)
+                print(f"[filter] {post_id}: {created_at_aware} >= {cutoff} → ✅ 포함")
+            else:
+                print(f"[filter] {post_id}: {created_at_aware} < {cutoff} → ❌ 제외")
     
+    print(f"[filter] 결과: {len(posts)}개 중 {len(filtered)}개 통과")
     return filtered
 
 

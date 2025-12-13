@@ -1,6 +1,7 @@
 """Threads 프로필 스크래핑 로직 모듈"""
 import asyncio
 import re
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout, Page, Browser
@@ -11,6 +12,23 @@ THREADS_BASE_URL = "https://www.threads.com"
 PAGE_LOAD_TIMEOUT = 30000
 NETWORK_IDLE_TIMEOUT = 15000
 REPLY_LOAD_TIMEOUT = 10000
+
+
+def _parse_threads_datetime(dt_str: Optional[str]) -> Optional[datetime]:
+    """Threads time[datetime] 값을 timezone-aware datetime(UTC)로 파싱."""
+    if not dt_str:
+        return None
+    s = dt_str.strip()
+    try:
+        # 흔한 ISO 포맷: 2024-01-01T00:00:00Z
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 def _extract_username(input_str: str) -> str:
@@ -183,6 +201,8 @@ async def scrape_threads_profile(
     username: str,
     max_posts: int | None = None,
     max_scroll_rounds: int = 50,
+    cutoff_utc: Optional[datetime] = None,
+    cutoff_old_streak_threshold: int = 6,
 ) -> List[Dict[str, Any]]:
     """주어진 Threads 프로필에서 최신 게시물 일부를 스크래핑하는 함수."""
     # username 정규화 (URL이나 잘못된 형식 처리)
@@ -214,6 +234,8 @@ async def scrape_threads_profile(
         seen_post_ids: set[str] = set()
         last_count = 0
         no_new_posts_count = 0  # 연속으로 새 게시물이 없는 횟수
+        old_post_streak = 0  # cutoff 이전 게시물이 연속으로 나온 횟수(조기 종료용)
+        early_stop = False
         
         # 최소 스크롤 보장 (pinned 게시물 때문에 최신 게시물이 아래에 있을 수 있음)
         MIN_SCROLL_ROUNDS = 5
@@ -226,7 +248,13 @@ async def scrape_threads_profile(
                 if max_posts is not None and len(results) >= max_posts:
                     break
 
-                post_link = await node.query_selector("a[href*='/post/']")
+                # 컨테이너 안에 '/post/' 링크가 여러 개 있을 수 있어(공유/인용/추천 등)
+                # 시간(time)을 포함한 링크를 우선 선택해 URL(post_id)와 텍스트 매칭을 안정화한다.
+                post_link = await node.query_selector("a[href*='/post/']:has(time)")
+                if not post_link:
+                    post_link = await node.query_selector("a[href^='/@'][href*='/post/']")
+                if not post_link:
+                    post_link = await node.query_selector("a[href*='/post/']")
                 if not post_link:
                     continue
 
@@ -250,11 +278,36 @@ async def scrape_threads_profile(
                     text_content = await node.inner_text()
 
                 results.append({
+                    "post_id": post_id,
                     "text": (text_content or "").strip(),
                     "created_at": created_at,
                     "url": full_url,
                 })
                 seen_post_ids.add(post_id)
+
+                # cutoff 기반 조기 종료 판단 (보수적으로: 최소 스크롤 이후, 연속 N개가 cutoff 이전이면 종료)
+                if cutoff_utc is not None:
+                    created_dt = _parse_threads_datetime(created_at)
+                    if created_dt is not None and created_dt < cutoff_utc:
+                        old_post_streak += 1
+                    else:
+                        old_post_streak = 0
+
+                    if (
+                        scroll_round >= MIN_SCROLL_ROUNDS
+                        and len(results) >= 10
+                        and old_post_streak >= max(1, cutoff_old_streak_threshold)
+                    ):
+                        print(
+                            f"[scraper] cutoff 이전 게시물 {old_post_streak}개 연속 발견 → 조기 종료 "
+                            f"(cutoff_utc={cutoff_utc.isoformat()})"
+                        )
+                        # 내부 루프/외부 루프 모두 종료
+                        early_stop = True
+                        break
+            
+            if early_stop:
+                break
 
             if max_posts is not None and len(results) >= max_posts:
                 break
@@ -305,7 +358,13 @@ def _extract_author_from_url(url: str) -> Optional[str]:
 async def _parse_single_post(node, seen_ids: set) -> Optional[Dict[str, Any]]:
     """단일 게시물 노드에서 데이터 추출."""
     try:
-        post_link = await node.query_selector("a[href*='/post/']")
+        # 컨테이너 안에 '/post/' 링크가 여러 개 있을 수 있어(공유/인용/추천 등)
+        # 시간(time)을 포함한 링크를 우선 선택해 URL(post_id)와 텍스트 매칭을 안정화한다.
+        post_link = await node.query_selector("a[href*='/post/']:has(time)")
+        if not post_link:
+            post_link = await node.query_selector("a[href^='/@'][href*='/post/']")
+        if not post_link:
+            post_link = await node.query_selector("a[href*='/post/']")
         if not post_link:
             return None
         
@@ -530,26 +589,31 @@ async def scrape_thread_with_replies(
             # - root 게시물 작성자와 동일한 작성자의 답글만 수집
             # - 다른 사용자의 답글(추천/관련 게시물 포함)은 제외
             filtered_replies = []
-            root_found_in_list = False
             root_author_name = root_post.get("author") if root_post else root_author
             
             print(f"[scraper] 원작자: {root_author_name}")
+
+            # DOM 순서에서 root가 항상 앞에 온다는 가정은 깨질 수 있다.
+            # 따라서 root가 등장한 "인덱스 이후"의 게시물만 답글 후보로 삼는다.
+            root_key = root_post.get("post_id")
+            root_index: Optional[int] = None
+            if root_key:
+                for i, p in enumerate(all_posts):
+                    if p.get("post_id") == root_key:
+                        root_index = i
+                        break
             
-            for post in all_posts:
-                if post["post_id"] == post_id:
-                    root_found_in_list = True
-                    continue
+            candidate_posts = all_posts[(root_index + 1):] if root_index is not None else all_posts[1:]
+
+            for post in candidate_posts:
+                post_author = post.get("author")
                 
-                # root를 찾은 후의 게시물만 답글로 취급
-                if root_found_in_list:
-                    post_author = post.get("author")
-                    
-                    # 원작자가 작성한 답글만 포함
-                    if post_author and root_author_name and post_author.lower() == root_author_name.lower():
-                        filtered_replies.append(post)
-                        print(f"[scraper] ✅ 원작자 답글 포함: {post.get('post_id')} by {post_author}")
-                    else:
-                        print(f"[scraper] ❌ 다른 사용자 답글 제외: {post.get('post_id')} by {post_author}")
+                # 원작자가 작성한 답글만 포함
+                if post_author and root_author_name and post_author.lower() == root_author_name.lower():
+                    filtered_replies.append(post)
+                    print(f"[scraper] ✅ 원작자 답글 포함: {post.get('post_id')} by {post_author}")
+                else:
+                    print(f"[scraper] ❌ 다른 사용자 답글 제외: {post.get('post_id')} by {post_author}")
             
             print(f"[scraper] 필터링 후 답글 수: {len(filtered_replies)} (원작자: {root_author_name})")
             
@@ -573,6 +637,7 @@ async def scrape_threads_profile_with_replies(
     include_replies: bool = False,
     max_reply_depth: int = 3,
     max_total_posts: int = 100,
+    cutoff_utc: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """프로필의 게시물을 수집하고, 선택적으로 각 게시물의 답글도 수집.
     
@@ -592,6 +657,7 @@ async def scrape_threads_profile_with_replies(
         username=username,
         max_posts=max_posts,
         max_scroll_rounds=max_scroll_rounds,
+        cutoff_utc=cutoff_utc,
     )
     
     if not include_replies:

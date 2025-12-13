@@ -44,6 +44,27 @@ def make_aware(dt: datetime) -> datetime:
     return dt
 
 
+def compute_cutoff_utc(
+    since_days: Optional[int] = None,
+    since_date: Optional[str] = None,
+) -> Optional[datetime]:
+    """since_days/since_date로 cutoff(UTC, timezone-aware) 계산.
+    
+    - since_date가 있으면 since_days보다 우선
+    - filter_posts_by_date와 동일한 의미를 유지
+    """
+    if since_date:
+        parsed = parse_datetime(since_date)
+        if not parsed:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=KST)
+        return parsed.astimezone(UTC)
+    if since_days:
+        return datetime.now(UTC) - timedelta(days=since_days)
+    return None
+
+
 def filter_posts_by_date(
     posts: List[Dict[str, Any]],
     since_days: Optional[int] = None,
@@ -437,6 +458,7 @@ async def scrape_profile_with_replies(request: ScrapeWithRepliesRequest):
             max_posts=request.max_posts,
             include_replies=request.include_replies,
             max_reply_depth=request.max_reply_depth,
+            cutoff_utc=compute_cutoff_utc(since_days=request.since_days, since_date=request.since_date),
         )
         
         # 날짜 필터 적용
@@ -546,10 +568,12 @@ async def scrape_get(
             raise HTTPException(status_code=400, detail="사용자명이 필요합니다")
         
         # 1단계: 프로필에서 게시물 목록 먼저 수집 (날짜 정보 포함)
+        cutoff_utc = compute_cutoff_utc(since_days=since_days, since_date=since_date)
         profile_posts = await scrape_threads_profile(
             username=username,
             max_posts=None,  # 제한 없음
             max_scroll_rounds=200,
+            cutoff_utc=cutoff_utc,
         )
         
         total_before_filter = len(profile_posts)
@@ -709,6 +733,7 @@ async def scrape_post(request: ScrapeRequest):
             username=username,
             max_posts=request.max_posts,
             max_scroll_rounds=200,  # 내부적으로 충분히 높은 값 사용
+            cutoff_utc=compute_cutoff_utc(since_days=request.since_days, since_date=request.since_date),
         )
         
         total_before_filter = len(posts)
@@ -785,6 +810,7 @@ async def scrape_single_account(
             username=username,
             max_posts=max_posts,
             max_scroll_rounds=max_scroll_rounds,
+            cutoff_utc=compute_cutoff_utc(since_days=since_days, since_date=since_date),
         )
         
         total_before_filter = len(posts)

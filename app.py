@@ -245,7 +245,7 @@ class ThreadWithRepliesResponse(BaseModel):
 class ScrapeThreadRequest(BaseModel):
     """개별 스레드 스크래핑 요청 모델"""
     post_url: str = Field(..., description="게시물 URL (예: 'https://www.threads.com/@user/post/ABC123')")
-    max_depth: int = Field(5, description="최대 답글 깊이", ge=1, le=10)
+    max_depth: int = Field(1, description="최대 답글 깊이 (기본: 루트 + 직접 reply)", ge=1, le=10)
     max_replies_per_level: int = Field(100, description="각 레벨당 최대 답글 수", ge=1, le=500)
     
     model_config = {
@@ -266,7 +266,7 @@ class ScrapeWithRepliesRequest(BaseModel):
     username: str = Field(..., description="Threads 사용자명")
     max_posts: Optional[int] = Field(None, description="최대 수집할 게시물 수")
     include_replies: bool = Field(True, description="답글 포함 여부")
-    max_reply_depth: int = Field(3, description="최대 답글 깊이", ge=1, le=10)
+    max_reply_depth: int = Field(1, description="최대 답글 깊이 (기본: 루트 + 직접 reply)", ge=1, le=10)
     since_days: Optional[int] = Field(None, description="최근 N일 이내 게시물만", ge=1, le=365)
     since_date: Optional[str] = Field(None, description="특정 날짜 이후 게시물만 (ISO 형식)")
     
@@ -315,7 +315,7 @@ async def root():
         "options": {
             "since_days": "기간 설정 (기본: 1일, 예: since_days=7 → 일주일)",
             "include_replies": "답글 포함 여부 (기본: true)",
-            "max_reply_depth": "답글 깊이 (기본: 5)",
+            "max_reply_depth": "답글 깊이 (기본: 1 - 루트 + 직접 reply)",
         },
     }
 
@@ -331,7 +331,7 @@ async def health():
 @app.get("/scrape-thread", response_model=ThreadWithRepliesResponse)
 async def scrape_thread_get(
     url: str = Query(..., description="게시물 URL (예: 'https://www.threads.com/@user/post/ABC123')"),
-    max_depth: int = Query(5, description="최대 답글 깊이", ge=1, le=10),
+    max_depth: int = Query(1, description="최대 답글 깊이 (기본: 루트 + 직접 reply)", ge=1, le=10),
     max_replies: int = Query(100, description="각 레벨당 최대 답글 수", ge=1, le=500),
 ):
     """GET 방식으로 개별 게시물과 모든 답글 수집
@@ -546,7 +546,7 @@ async def scrape_get(
     include_replies: bool = Query(True, description="답글 포함 여부 (기본: True)"),
     since_days: int = Query(1, description="최근 N일 이내 게시물만 (기본: 1일)", ge=1, le=365),
     since_date: Optional[str] = Query(None, description="특정 날짜 이후 게시물만 (ISO 형식, since_days보다 우선)"),
-    max_reply_depth: int = Query(5, description="답글 수집 시 최대 깊이", ge=1, le=10),
+    max_reply_depth: int = Query(1, description="답글 수집 시 최대 깊이 (기본: 루트 + 직접 reply)", ge=1, le=10),
     max_total_posts: int = Query(100, description="전체 출력 최대 게시물 수 (모든 root + 모든 답글 합계, 기본: 100)", ge=1, le=1000),
 ):
     """사용자명으로 스레드 + 모든 답글 수집
@@ -608,6 +608,7 @@ async def scrape_get(
             
             thread_responses = []
             total_collected = 0
+            seen_root_post_ids: set[str] = set()
             
             for i, post in enumerate(filtered_posts):
                 # 최대 게시물 수 도달 시 중단
@@ -630,6 +631,17 @@ async def scrape_get(
                         max_depth=max_reply_depth,
                         max_total_posts=remaining,
                     )
+
+                    # 같은 스레드(같은 root post_id) 중복 제거:
+                    # 프로필에는 루트 글과 reply 글이 모두 섞여 나올 수 있어,
+                    # reply URL로 요청해도 scrape_thread_with_replies()가 루트로 정규화한 뒤
+                    # root post_id 기준으로 1번만 포함한다.
+                    root_post_id = thread_data.get("post_id")
+                    if root_post_id and root_post_id in seen_root_post_ids:
+                        print(f"[API] 중복 스레드 스킵: root post_id={root_post_id} (url={post_url})")
+                        continue
+                    if root_post_id:
+                        seen_root_post_ids.add(root_post_id)
                     
                     # 원본 created_at 유지 (프로필에서 가져온 정확한 날짜)
                     thread_data["created_at"] = post.get("created_at")

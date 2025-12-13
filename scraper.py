@@ -508,10 +508,10 @@ async def scrape_thread_with_replies(
         else:
             post_url = f"{THREADS_BASE_URL}/{post_url}"
     
-    post_id = _extract_post_id(post_url)
+    requested_post_id = _extract_post_id(post_url)
     root_author = _extract_author_from_url(post_url)
     
-    if not post_id:
+    if not requested_post_id:
         raise ValueError(f"유효하지 않은 게시물 URL: {post_url}")
     
     print(f"[scraper] 스레드 스크래핑 시작: {post_url} (작성자: {root_author})")
@@ -548,16 +548,11 @@ async def scrape_thread_with_replies(
             
             seen_ids: set = set()
             all_posts: List[Dict[str, Any]] = []
-            found_root = False
             
             for node in all_nodes:
                 post_data = await _parse_single_post(node, seen_ids)
                 if not post_data:
                     continue
-                
-                # root 게시물 발견 체크
-                if post_data["post_id"] == post_id:
-                    found_root = True
                 
                 all_posts.append(post_data)
                 
@@ -567,59 +562,48 @@ async def scrape_thread_with_replies(
             
             print(f"[scraper] 전체 수집된 게시물 수: {len(all_posts)}")
             
-            # root 게시물 찾기
-            root_post = None
-            replies = []
-            
-            for post in all_posts:
-                if post["post_id"] == post_id:
-                    root_post = post
-                else:
-                    replies.append(post)
-            
-            # root가 없으면 첫 번째 게시물을 root로 사용
-            if not root_post and all_posts:
-                root_post = all_posts[0]
-                replies = all_posts[1:]
-            
-            if not root_post:
+            # =============================
+            # root(루트) 게시물 정규화
+            #
+            # Threads에서 "reply URL"로 들어가도 화면 상단에는 보통 상위(부모/루트) 게시물이 함께 렌더링됩니다.
+            # 기존 로직은 "요청 URL의 post_id"를 root로 고정해서, 같은 스레드를
+            # - 루트 URL로 스크랩 1번
+            # - reply URL로 스크랩 1번
+            # 처럼 중복 수집하는 문제가 생길 수 있습니다.
+            #
+            # 따라서 DOM에 나타난 게시물 목록의 "최상단 게시물"을 root로 삼아
+            # reply URL로 요청해도 동일한 root post_id로 정규화되도록 합니다.
+            # =============================
+            if not all_posts:
                 raise ValueError(f"게시물을 찾을 수 없습니다: {post_url}")
-            
-            # 답글 필터링: 원작자가 작성한 답글만 남기기
-            # - root 게시물 작성자와 동일한 작성자의 답글만 수집
-            # - 다른 사용자의 답글(추천/관련 게시물 포함)은 제외
-            filtered_replies = []
-            root_author_name = root_post.get("author") if root_post else root_author
-            
-            print(f"[scraper] 원작자: {root_author_name}")
 
-            # DOM 순서에서 root가 항상 앞에 온다는 가정은 깨질 수 있다.
-            # 따라서 root가 등장한 "인덱스 이후"의 게시물만 답글 후보로 삼는다.
-            root_key = root_post.get("post_id")
-            root_index: Optional[int] = None
-            if root_key:
-                for i, p in enumerate(all_posts):
-                    if p.get("post_id") == root_key:
-                        root_index = i
-                        break
-            
-            candidate_posts = all_posts[(root_index + 1):] if root_index is not None else all_posts[1:]
+            # DOM 순서의 첫 게시물을 root로 간주 (가장 상위 게시물)
+            root_post = all_posts[0]
+            root_index = 0
 
-            for post in candidate_posts:
-                post_author = post.get("author")
-                
-                # 원작자가 작성한 답글만 포함
-                if post_author and root_author_name and post_author.lower() == root_author_name.lower():
-                    filtered_replies.append(post)
-                    print(f"[scraper] ✅ 원작자 답글 포함: {post.get('post_id')} by {post_author}")
-                else:
-                    print(f"[scraper] ❌ 다른 사용자 답글 제외: {post.get('post_id')} by {post_author}")
+            # 답글 후보: root 이후에 렌더링된 게시물들
+            candidate_posts = all_posts[root_index + 1 :]
             
-            print(f"[scraper] 필터링 후 답글 수: {len(filtered_replies)} (원작자: {root_author_name})")
-            
-            # 답글을 root에 연결
-            root_post["replies"] = filtered_replies
-            root_post["total_replies_count"] = len(filtered_replies)
+            # =============================
+            # depth 처리
+            #
+            # 현재 구현은 "루트 + (루트 화면에 표시되는) 답글 목록"을 한 번에 수집합니다.
+            # 즉, 기본적으로 root(0) + reply(1) 레벨 수집이며,
+            # reply의 reply(2+)를 별도로 재귀 탐색하지 않습니다.
+            # =============================
+            if max_depth <= 0:
+                # 방어적 처리 (API 레이어에서는 ge=1이지만 내부 호출 대비)
+                candidate_posts = []
+
+            # 답글을 root에 연결 (작성자 기반 필터링 제거: 스레드의 reply는 작성자와 무관하게 모두 포함)
+            root_post["replies"] = candidate_posts
+            root_post["total_replies_count"] = len(candidate_posts)
+
+            # 요청 URL이 reply였더라도, root 정규화 결과를 로그로 남김
+            if requested_post_id and root_post.get("post_id") and requested_post_id != root_post.get("post_id"):
+                print(
+                    f"[scraper] 요청 post_id({requested_post_id}) → root post_id({root_post.get('post_id')})로 정규화"
+                )
             
             return root_post
             

@@ -160,7 +160,7 @@ class ScrapeResponse(BaseModel):
 
 
 class BatchScrapeRequest(BaseModel):
-    """배치 스크래핑 요청 모델 (내부 사용자용)"""
+    """배치 스크래핑 요청 모델 (레거시 호환용)"""
     usernames: List[str] = Field(..., description="Threads 사용자명 리스트 (예: ['zuck', 'meta'])", min_length=1, max_length=50)
     max_posts: Optional[int] = Field(None, description="각 계정당 최대 수집할 게시물 수 (None이면 제한 없음)")
     max_scroll_rounds: int = Field(50, description="각 계정당 최대 스크롤 라운드 수", ge=1, le=200)
@@ -174,6 +174,30 @@ class BatchScrapeRequest(BaseModel):
                     "usernames": ["zuck", "meta", "instagram"],
                     "max_posts": 10,
                     "since_days": 7
+                }
+            ]
+        }
+    }
+
+
+class BatchScrapeRequestV2(BaseModel):
+    """배치 스크래핑 요청 모델 (GET /scrape와 동일한 파라미터)"""
+    usernames: List[str] = Field(..., description="Threads 사용자명 리스트 (예: ['zuck', 'meta'])", min_length=1, max_length=50)
+    include_replies: bool = Field(True, description="답글 포함 여부 (기본: True)")
+    since_days: int = Field(1, description="최근 N일 이내 게시물만 (기본: 1일)", ge=1, le=365)
+    since_date: Optional[str] = Field(None, description="특정 날짜 이후 게시물만 (ISO 형식, since_days보다 우선)")
+    max_reply_depth: int = Field(1, description="답글 수집 시 최대 깊이 (기본: 루트 + 직접 reply)", ge=1, le=10)
+    max_total_posts: int = Field(100, description="각 계정당 최대 게시물 수 (root + 답글 합계, 기본: 100)", ge=1, le=1000)
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "usernames": ["zuck", "meta", "instagram"],
+                    "include_replies": True,
+                    "since_days": 7,
+                    "max_reply_depth": 1,
+                    "max_total_posts": 100
                 }
             ]
         }
@@ -899,9 +923,12 @@ async def scrape_single_account_v2(
     max_scroll_rounds: int,
     since_days: Optional[int] = None,
     since_date: Optional[str] = None,
+    include_replies: bool = True,
+    max_reply_depth: int = 1,
+    max_total_posts: int = 100,
     semaphore: Optional[asyncio.Semaphore] = None,
 ) -> Dict[str, Any]:
-    """단일 계정 스크래핑 헬퍼 함수 (새로운 응답 구조)"""
+    """단일 계정 스크래핑 헬퍼 함수 (GET /scrape와 동일한 로직)"""
     import time
     start_time = time.time()
     username = username.lstrip("@")
@@ -953,17 +980,73 @@ async def scrape_single_account_v2(
             # 날짜 필터 적용
             filtered_posts = filter_posts_by_date(posts, since_days=since_days, since_date=since_date)
             
-            # 게시물 응답 생성
-            post_responses = []
-            for post in filtered_posts:
-                try:
-                    post_responses.append({
-                        "text": post.get("text") or "",
-                        "created_at": post.get("created_at"),
-                        "url": post.get("url") or "",
-                    })
-                except Exception:
-                    continue
+            # include_replies에 따라 처리
+            if include_replies:
+                # 답글 포함 - GET /scrape와 동일한 로직
+                post_responses = []
+                total_collected = 0
+                total_replies_collected = 0
+                posts_with_replies_count = 0
+                seen_root_post_ids: set = set()
+                
+                for post in filtered_posts:
+                    if total_collected >= max_total_posts:
+                        break
+                    
+                    post_url = post.get("url", "")
+                    if not post_url:
+                        continue
+                    
+                    try:
+                        remaining = max_total_posts - total_collected
+                        thread_data = await scrape_thread_with_replies(
+                            post_url=post_url,
+                            max_depth=max_reply_depth,
+                            max_total_posts=remaining,
+                        )
+                        
+                        root_post_id = thread_data.get("post_id")
+                        if root_post_id and root_post_id in seen_root_post_ids:
+                            continue
+                        if root_post_id:
+                            seen_root_post_ids.add(root_post_id)
+                        
+                        thread_data["created_at"] = post.get("created_at")
+                        replies_count = len(thread_data.get("replies", []))
+                        total_collected += 1 + replies_count
+                        total_replies_collected += replies_count
+                        if replies_count > 0:
+                            posts_with_replies_count += 1
+                        
+                        post_responses.append(thread_data)
+                        
+                    except Exception as e:
+                        post_responses.append({
+                            "post_id": None,
+                            "text": post.get("text", ""),
+                            "created_at": post.get("created_at"),
+                            "url": post_url,
+                            "author": None,
+                            "replies": [],
+                            "total_replies_count": 0,
+                        })
+                        total_collected += 1
+                    
+                    await asyncio.sleep(1)  # rate limiting
+            else:
+                # 답글 미포함
+                post_responses = []
+                total_replies_collected = 0
+                posts_with_replies_count = 0
+                for post in filtered_posts[:max_total_posts]:
+                    try:
+                        post_responses.append({
+                            "text": post.get("text") or "",
+                            "created_at": post.get("created_at"),
+                            "url": post.get("url") or "",
+                        })
+                    except Exception:
+                        continue
             
             duration = round(time.time() - start_time, 2)
             
@@ -997,9 +1080,9 @@ async def scrape_single_account_v2(
                 "stats": {
                     "total_scraped": total_before_filter,
                     "filtered_count": len(post_responses),
-                    "excluded_count": total_before_filter - len(post_responses),
-                    "total_replies": 0,
-                    "posts_with_replies": 0,
+                    "excluded_count": total_before_filter - len(filtered_posts),
+                    "total_replies": total_replies_collected,
+                    "posts_with_replies": posts_with_replies_count,
                 },
                 "date_range": {
                     "days": date_range_days,
@@ -1166,37 +1249,28 @@ async def batch_scrape_legacy(request: BatchScrapeRequest):
 
 
 @app.post("/batch-scrape")
-async def batch_scrape_v2(request: BatchScrapeRequest):
-    """배치 스크래핑 (새로운 버전) - 동시 5개 병렬 처리
+async def batch_scrape_v2(request: BatchScrapeRequestV2):
+    """배치 스크래핑 - 동시 5개 병렬 처리
     
     여러 계정을 한 번에 스크래핑합니다.
+    - GET /scrape와 동일한 파라미터 (username만 리스트로)
     - 동시 최대 5개 계정 병렬 처리 (Semaphore)
     - 전체 메타데이터 포함
-    - 깔끔한 응답 구조
+    
+    파라미터 (GET /scrape와 동일):
+    - usernames: 사용자명 리스트 (필수)
+    - include_replies: 답글 포함 여부 (기본: True)
+    - since_days: 최근 N일 이내 (기본: 1일)
+    - since_date: 특정 날짜 이후 (since_days보다 우선)
+    - max_reply_depth: 답글 깊이 (기본: 1)
+    - max_total_posts: 각 계정당 최대 게시물 수 (기본: 100)
     
     예시:
     ```json
     {
-        "usernames": ["zuck", "meta", "instagram", "threads", "facebookapp"],
-        "max_posts": 10,
+        "usernames": ["zuck", "meta", "instagram"],
+        "include_replies": true,
         "since_days": 7
-    }
-    ```
-    
-    응답:
-    ```json
-    {
-        "total_meta": {
-            "accounts_count": 5,
-            "success_count": 4,
-            "failed_count": 1,
-            "total_duration_seconds": 45.2,
-            "total_scraped": 120,
-            "total_filtered": 35,
-            "total_excluded": 85,
-            "completed_at": "2025-12-16T11:00:00+09:00"
-        },
-        "results": [...]
     }
     ```
     """
@@ -1213,15 +1287,18 @@ async def batch_scrape_v2(request: BatchScrapeRequest):
         MAX_CONCURRENT = 5
         semaphore = asyncio.Semaphore(MAX_CONCURRENT)
         
-        print(f"[batch] 배치 스크래핑 시작: {len(unique_usernames)}개 계정 (동시 최대 {MAX_CONCURRENT}개)")
+        print(f"[batch] 배치 스크래핑 시작: {len(unique_usernames)}개 계정 (동시 최대 {MAX_CONCURRENT}개, include_replies={request.include_replies})")
         
         tasks = [
             scrape_single_account_v2(
                 username=username,
-                max_posts=request.max_posts,
-                max_scroll_rounds=request.max_scroll_rounds,
+                max_posts=None,  # max_total_posts로 제어
+                max_scroll_rounds=200,
                 since_days=request.since_days,
                 since_date=request.since_date,
+                include_replies=request.include_replies,
+                max_reply_depth=request.max_reply_depth,
+                max_total_posts=request.max_total_posts,
                 semaphore=semaphore,
             )
             for username in unique_usernames

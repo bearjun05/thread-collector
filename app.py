@@ -560,8 +560,15 @@ async def scrape_get(
     - GET /scrape?username=zuck  (최근 1일, 답글 포함, 총 100개)
     - GET /scrape?username=zuck&since_days=7  (최근 일주일)
     - GET /scrape?username=zuck&max_total_posts=50  (총 50개로 제한)
+    
+    응답 형식:
+    - 배열의 첫 번째 요소: 메타데이터 (_type: "metadata")
+    - 배열의 두 번째 요소: 기존 응답 데이터
     """
     try:
+        import time
+        scrape_start_time = time.time()
+        
         username = username.lstrip("@")
         
         if not username:
@@ -569,12 +576,15 @@ async def scrape_get(
         
         # 1단계: 프로필에서 게시물 목록 먼저 수집 (날짜 정보 포함)
         cutoff_utc = compute_cutoff_utc(since_days=since_days, since_date=since_date)
-        profile_posts = await scrape_threads_profile(
+        scrape_result = await scrape_threads_profile(
             username=username,
             max_posts=None,  # 제한 없음
             max_scroll_rounds=200,
             cutoff_utc=cutoff_utc,
         )
+        profile_posts = scrape_result["posts"]
+        profile_scroll_rounds = scrape_result["scroll_rounds"]
+        profile_duration = scrape_result["duration_seconds"]
         
         total_before_filter = len(profile_posts)
         print(f"[API] 프로필에서 수집된 게시물: {total_before_filter}개")
@@ -683,36 +693,126 @@ async def scrape_get(
             
             print(f"[API] 전체 수집 완료: 총 {total_collected}개 게시물")
             
-            return ScrapeWithRepliesResponse(
-                username=username,
-                total_posts=len(thread_responses),
-                posts=thread_responses,
-                scraped_at=datetime.now(KST).isoformat(),
-                filter_applied=filter_desc,
-            )
+            # 메타데이터 계산
+            total_scrape_duration = round(time.time() - scrape_start_time, 2)
+            total_replies_collected = sum(t.total_replies_count for t in thread_responses)
+            posts_with_replies_count = sum(1 for t in thread_responses if t.total_replies_count > 0)
+            
+            # 날짜 범위 계산
+            post_dates = [parse_datetime(t.created_at) for t in thread_responses if t.created_at]
+            post_dates = [d for d in post_dates if d is not None]
+            if post_dates:
+                newest_date = max(post_dates)
+                oldest_date = min(post_dates)
+                date_range_days = (newest_date - oldest_date).days
+                newest_date_str = newest_date.isoformat()
+                oldest_date_str = oldest_date.isoformat()
+            else:
+                date_range_days = 0
+                newest_date_str = oldest_date_str = None
+            
+            # 상태 결정
+            if len(thread_responses) == 0:
+                scrape_status = "failed"
+            elif total_collected < max_total_posts and len(filtered_posts) > len(thread_responses):
+                scrape_status = "partial"
+            else:
+                scrape_status = "success"
+            
+            # 깔끔한 단일 객체 응답
+            response = {
+                "meta": {
+                    "username": username,
+                    "scraped_at": datetime.now(KST).isoformat(),
+                    "duration_seconds": total_scrape_duration,
+                    "scroll_rounds": profile_scroll_rounds,
+                    "status": scrape_status,
+                },
+                "stats": {
+                    "total_scraped": total_before_filter,
+                    "filtered_count": len(thread_responses),
+                    "excluded_count": total_before_filter - len(filtered_posts),
+                    "total_replies": total_replies_collected,
+                    "posts_with_replies": posts_with_replies_count,
+                },
+                "date_range": {
+                    "days": date_range_days,
+                    "newest": newest_date_str,
+                    "oldest": oldest_date_str,
+                },
+                "filter": {
+                    "type": filter_desc,
+                    "cutoff_date": cutoff_utc.isoformat() if cutoff_utc else None,
+                },
+                "posts": [t.model_dump() for t in thread_responses],
+            }
+            
+            return JSONResponse(content=response)
         else:
-            # 답글 미포함 시 기존 ScrapeResponse 반환
+            # 답글 미포함 시
             post_responses = []
             for post in filtered_posts:
                 try:
-                    post_data = {
+                    post_responses.append({
                         "text": post.get("text") or "",
                         "created_at": post.get("created_at"),
                         "url": post.get("url") or "",
-                    }
-                    post_responses.append(PostResponse(**post_data))
+                    })
                 except Exception as post_error:
                     print(f"PostResponse 변환 실패: {post_error}")
                     continue
             
-            return ScrapeResponse(
-                username=username,
-                total_posts=total_before_filter,
-                filtered_posts=len(post_responses),
-                posts=post_responses,
-                scraped_at=datetime.now(KST).isoformat(),
-                filter_applied=filter_desc,
-            )
+            # 메타데이터 계산
+            total_scrape_duration = round(time.time() - scrape_start_time, 2)
+            
+            # 날짜 범위 계산
+            post_dates = [parse_datetime(p["created_at"]) for p in post_responses if p.get("created_at")]
+            post_dates = [d for d in post_dates if d is not None]
+            if post_dates:
+                newest_date = max(post_dates)
+                oldest_date = min(post_dates)
+                date_range_days = (newest_date - oldest_date).days
+                newest_date_str = newest_date.isoformat()
+                oldest_date_str = oldest_date.isoformat()
+            else:
+                date_range_days = 0
+                newest_date_str = oldest_date_str = None
+            
+            # 상태 결정
+            if len(post_responses) == 0:
+                scrape_status = "failed" if total_before_filter == 0 else "success"
+            else:
+                scrape_status = "success"
+            
+            # 깔끔한 단일 객체 응답
+            response = {
+                "meta": {
+                    "username": username,
+                    "scraped_at": datetime.now(KST).isoformat(),
+                    "duration_seconds": total_scrape_duration,
+                    "scroll_rounds": profile_scroll_rounds,
+                    "status": scrape_status,
+                },
+                "stats": {
+                    "total_scraped": total_before_filter,
+                    "filtered_count": len(post_responses),
+                    "excluded_count": total_before_filter - len(post_responses),
+                    "total_replies": 0,
+                    "posts_with_replies": 0,
+                },
+                "date_range": {
+                    "days": date_range_days,
+                    "newest": newest_date_str,
+                    "oldest": oldest_date_str,
+                },
+                "filter": {
+                    "type": filter_desc,
+                    "cutoff_date": cutoff_utc.isoformat() if cutoff_utc else None,
+                },
+                "posts": post_responses,
+            }
+            
+            return JSONResponse(content=response)
     except HTTPException:
         raise
     except Exception as e:
@@ -741,12 +841,13 @@ async def scrape_post(request: ScrapeRequest):
         if not username:
             raise HTTPException(status_code=400, detail="사용자명이 필요합니다")
         
-        posts = await scrape_threads_profile(
+        scrape_result = await scrape_threads_profile(
             username=username,
             max_posts=request.max_posts,
             max_scroll_rounds=200,  # 내부적으로 충분히 높은 값 사용
             cutoff_utc=compute_cutoff_utc(since_days=request.since_days, since_date=request.since_date),
         )
+        posts = scrape_result["posts"]
         
         total_before_filter = len(posts)
         
@@ -818,12 +919,13 @@ async def scrape_single_account(
                 scraped_at=scraped_at,
             )
         
-        posts = await scrape_threads_profile(
+        scrape_result = await scrape_threads_profile(
             username=username,
             max_posts=max_posts,
             max_scroll_rounds=max_scroll_rounds,
             cutoff_utc=compute_cutoff_utc(since_days=since_days, since_date=since_date),
         )
+        posts = scrape_result["posts"]
         
         total_before_filter = len(posts)
         

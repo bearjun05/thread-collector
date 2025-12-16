@@ -203,8 +203,18 @@ async def scrape_threads_profile(
     max_scroll_rounds: int = 50,
     cutoff_utc: Optional[datetime] = None,
     cutoff_old_streak_threshold: int = 6,
-) -> List[Dict[str, Any]]:
-    """주어진 Threads 프로필에서 최신 게시물 일부를 스크래핑하는 함수."""
+) -> Dict[str, Any]:
+    """주어진 Threads 프로필에서 최신 게시물 일부를 스크래핑하는 함수.
+    
+    Returns:
+        Dict with keys:
+        - posts: List[Dict] - 수집된 게시물 리스트
+        - scroll_rounds: int - 실제 스크롤 횟수
+        - duration_seconds: float - 스크래핑 소요 시간
+    """
+    import time
+    start_time = time.time()
+    
     # username 정규화 (URL이나 잘못된 형식 처리)
     clean_username = _extract_username(username)
     print(f"[scraper] 원본 입력: '{username}' → 정규화된 username: '{clean_username}'")
@@ -226,7 +236,7 @@ async def scrape_threads_profile(
         except PlaywrightTimeout:
             print(f"[scraper] 페이지 로딩 타임아웃: {url}")
             await browser.close()
-            return []
+            return {"posts": [], "scroll_rounds": 0, "duration_seconds": time.time() - start_time}
 
         post_selector = "div[data-pressable-container='true']"
 
@@ -240,8 +250,10 @@ async def scrape_threads_profile(
         # 최소 스크롤 보장 (pinned 게시물 때문에 최신 게시물이 아래에 있을 수 있음)
         MIN_SCROLL_ROUNDS = 5
         MAX_NO_NEW_POSTS = 3  # 연속 3번 새 게시물 없으면 중단
+        actual_scroll_rounds = 0
 
         for scroll_round in range(max_scroll_rounds):
+            actual_scroll_rounds = scroll_round + 1
             candidates = await page.query_selector_all(post_selector)
 
             for node in candidates:
@@ -327,10 +339,15 @@ async def scrape_threads_profile(
             await page.mouse.wheel(0, 2500)
             await page.wait_for_timeout(1200)
 
-        print(f"[scraper] 프로필 스크래핑 완료: {len(results)}개 게시물 수집")
+        print(f"[scraper] 프로필 스크래핑 완료: {len(results)}개 게시물 수집 ({actual_scroll_rounds}회 스크롤)")
         await browser.close()
 
-    return results
+    duration_seconds = time.time() - start_time
+    return {
+        "posts": results,
+        "scroll_rounds": actual_scroll_rounds,
+        "duration_seconds": round(duration_seconds, 2),
+    }
 
 
 def _extract_post_id(url: str) -> Optional[str]:
@@ -637,12 +654,13 @@ async def scrape_threads_profile_with_replies(
         게시물 리스트 (include_replies=True면 각 게시물에 replies 필드 포함)
     """
     # 먼저 프로필에서 root 게시물들 수집
-    posts = await scrape_threads_profile(
+    scrape_result = await scrape_threads_profile(
         username=username,
         max_posts=max_posts,
         max_scroll_rounds=max_scroll_rounds,
         cutoff_utc=cutoff_utc,
     )
+    posts = scrape_result["posts"]
     
     if not include_replies:
         return posts[:max_total_posts] if max_total_posts else posts

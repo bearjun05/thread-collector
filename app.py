@@ -181,23 +181,22 @@ class BatchScrapeRequest(BaseModel):
 
 
 class BatchScrapeRequestV2(BaseModel):
-    """배치 스크래핑 요청 모델 (GET /scrape와 동일한 파라미터)"""
+    """배치 스크래핑 요청 모델"""
     usernames: List[str] = Field(..., description="Threads 사용자명 리스트 (예: ['zuck', 'meta'])", min_length=1, max_length=50)
-    include_replies: bool = Field(True, description="답글 포함 여부 (기본: True)")
     since_days: int = Field(1, description="최근 N일 이내 게시물만 (기본: 1일)", ge=1, le=365)
     since_date: Optional[str] = Field(None, description="특정 날짜 이후 게시물만 (ISO 형식, since_days보다 우선)")
-    max_reply_depth: int = Field(1, description="답글 수집 시 최대 깊이 (기본: 루트 + 직접 reply)", ge=1, le=10)
-    max_total_posts: int = Field(100, description="각 계정당 최대 게시물 수 (root + 답글 합계, 기본: 100)", ge=1, le=1000)
+    max_per_account: int = Field(10, description="계정별 최대 스크랩 갯수 (기본: 10)", ge=1, le=100)
+    max_total: int = Field(300, description="전체 최대 스크랩 갯수 - 도달 시 중지 (기본: 300)", ge=1, le=1000)
+    include_replies: bool = Field(True, description="답글 포함 여부 (기본: True)")
+    max_reply_depth: int = Field(1, description="답글 수집 시 최대 깊이 (기본: 1)", ge=1, le=10)
     
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
                     "usernames": ["zuck", "meta", "instagram"],
-                    "include_replies": True,
-                    "since_days": 7,
-                    "max_reply_depth": 1,
-                    "max_total_posts": 100
+                    "max_per_account": 10,
+                    "max_total": 300
                 }
             ]
         }
@@ -1250,27 +1249,27 @@ async def batch_scrape_legacy(request: BatchScrapeRequest):
 
 @app.post("/batch-scrape")
 async def batch_scrape_v2(request: BatchScrapeRequestV2):
-    """배치 스크래핑 - 동시 5개 병렬 처리
+    """배치 스크래핑 - 계정별/전체 최대 갯수 제한
     
     여러 계정을 한 번에 스크래핑합니다.
-    - GET /scrape와 동일한 파라미터 (username만 리스트로)
-    - 동시 최대 5개 계정 병렬 처리 (Semaphore)
-    - 전체 메타데이터 포함
+    - max_per_account: 계정별 최대 스크랩 갯수
+    - max_total: 전체 최대 갯수 도달 시 중지
+    - 동시 최대 5개 계정 병렬 처리
     
-    파라미터 (GET /scrape와 동일):
+    파라미터:
     - usernames: 사용자명 리스트 (필수)
-    - include_replies: 답글 포함 여부 (기본: True)
     - since_days: 최근 N일 이내 (기본: 1일)
-    - since_date: 특정 날짜 이후 (since_days보다 우선)
+    - max_per_account: 계정별 최대 스크랩 갯수 (기본: 10)
+    - max_total: 전체 최대 스크랩 갯수 (기본: 300, 도달 시 중지)
+    - include_replies: 답글 포함 여부 (기본: True)
     - max_reply_depth: 답글 깊이 (기본: 1)
-    - max_total_posts: 각 계정당 최대 게시물 수 (기본: 100)
     
     예시:
     ```json
     {
         "usernames": ["zuck", "meta", "instagram"],
-        "include_replies": true,
-        "since_days": 7
+        "max_per_account": 10,
+        "max_total": 300
     }
     ```
     """
@@ -1283,28 +1282,44 @@ async def batch_scrape_v2(request: BatchScrapeRequestV2):
         
         unique_usernames = list(dict.fromkeys(request.usernames))
         
-        # 동시 5개 병렬 처리 제한
-        MAX_CONCURRENT = 5
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+        print(f"[batch] 배치 스크래핑 시작: {len(unique_usernames)}개 계정")
+        print(f"[batch] 설정: max_per_account={request.max_per_account}, max_total={request.max_total}")
         
-        print(f"[batch] 배치 스크래핑 시작: {len(unique_usernames)}개 계정 (동시 최대 {MAX_CONCURRENT}개, include_replies={request.include_replies})")
+        results = []
+        total_collected = 0  # 전체 수집된 게시물 수
+        skipped_accounts = []  # max_total 도달로 스킵된 계정
         
-        tasks = [
-            scrape_single_account_v2(
+        # 순차 처리 (max_total 제어를 위해)
+        for i, username in enumerate(unique_usernames):
+            # max_total 도달 시 중지
+            if total_collected >= request.max_total:
+                skipped_accounts = unique_usernames[i:]
+                print(f"[batch] max_total({request.max_total}) 도달, 나머지 {len(skipped_accounts)}개 계정 스킵")
+                break
+            
+            # 이 계정에서 수집할 수 있는 최대 갯수 계산
+            remaining = request.max_total - total_collected
+            account_max = min(request.max_per_account, remaining)
+            
+            print(f"[batch] {i+1}/{len(unique_usernames)} @{username} 스크래핑 시작 (max={account_max}, 현재 총 {total_collected}개)")
+            
+            result = await scrape_single_account_v2(
                 username=username,
-                max_posts=None,  # max_total_posts로 제어
-                max_scroll_rounds=200,
+                max_posts=account_max,  # 계정별 최대 갯수
+                max_scroll_rounds=50,
                 since_days=request.since_days,
                 since_date=request.since_date,
                 include_replies=request.include_replies,
                 max_reply_depth=request.max_reply_depth,
-                max_total_posts=request.max_total_posts,
-                semaphore=semaphore,
+                max_total_posts=account_max,
+                semaphore=None,
             )
-            for username in unique_usernames
-        ]
-        
-        results = await asyncio.gather(*tasks)
+            
+            results.append(result)
+            account_collected = result["stats"]["filtered_count"]
+            total_collected += account_collected
+            
+            print(f"[batch] @{username} 완료: {account_collected}개 수집 (총 {total_collected}개)")
         
         # 전체 메타데이터 계산
         batch_duration = round(time.time() - batch_start_time, 2)
@@ -1336,14 +1351,21 @@ async def batch_scrape_v2(request: BatchScrapeRequestV2):
         
         response = {
             "total_meta": {
-                "accounts_count": len(results),
+                "accounts_requested": len(unique_usernames),
+                "accounts_processed": len(results),
+                "accounts_skipped": len(skipped_accounts),
+                "skipped_usernames": skipped_accounts,
                 "success_count": success_count,
                 "failed_count": failed_count,
                 "total_duration_seconds": batch_duration,
-                "total_scraped": total_scraped,
-                "total_filtered": total_filtered,
-                "total_excluded": total_excluded,
+                "total_collected": total_filtered,
                 "total_replies": total_replies,
+                "settings": {
+                    "max_per_account": request.max_per_account,
+                    "max_total": request.max_total,
+                    "since_days": request.since_days,
+                    "include_replies": request.include_replies,
+                },
                 "date_range": {
                     "days": overall_days,
                     "newest": overall_newest,

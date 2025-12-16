@@ -916,6 +916,37 @@ async def scrape_post(request: ScrapeRequest):
         raise HTTPException(status_code=500, detail=error_detail)
 
 
+class SharedCounter:
+    """스레드 안전한 공유 카운터 (병렬 스크래핑에서 max_total 제어용)"""
+    def __init__(self, max_total: int):
+        self.max_total = max_total
+        self.count = 0
+        self._lock = asyncio.Lock()
+    
+    async def try_add(self, amount: int) -> int:
+        """
+        지정된 양을 추가 시도하고 실제로 추가된 양을 반환.
+        max_total을 초과하면 가능한 양만 추가.
+        """
+        async with self._lock:
+            remaining = self.max_total - self.count
+            if remaining <= 0:
+                return 0
+            added = min(amount, remaining)
+            self.count += added
+            return added
+    
+    async def get_remaining(self) -> int:
+        """남은 수집 가능 개수 반환"""
+        async with self._lock:
+            return max(0, self.max_total - self.count)
+    
+    async def is_full(self) -> bool:
+        """max_total에 도달했는지 확인"""
+        async with self._lock:
+            return self.count >= self.max_total
+
+
 async def scrape_single_account_v2(
     username: str,
     max_posts: Optional[int],
@@ -926,8 +957,13 @@ async def scrape_single_account_v2(
     max_reply_depth: int = 1,
     max_total_posts: int = 100,
     semaphore: Optional[asyncio.Semaphore] = None,
+    shared_counter: Optional[SharedCounter] = None,
 ) -> Dict[str, Any]:
-    """단일 계정 스크래핑 헬퍼 함수 (GET /scrape와 동일한 로직)"""
+    """단일 계정 스크래핑 헬퍼 함수 (GET /scrape와 동일한 로직)
+    
+    shared_counter가 제공되면 전체 max_total을 실시간으로 체크하여
+    도달 시 조기 종료합니다.
+    """
     import time
     start_time = time.time()
     username = username.lstrip("@")
@@ -942,6 +978,30 @@ async def scrape_single_account_v2(
         filter_desc = None
     
     async def do_scrape():
+        # 시작 전에 이미 max_total 도달했는지 확인
+        if shared_counter and await shared_counter.is_full():
+            print(f"[batch] @{username}: max_total 이미 도달, 스킵")
+            return {
+                "meta": {
+                    "username": username,
+                    "scraped_at": datetime.now(KST).isoformat(),
+                    "duration_seconds": 0,
+                    "scroll_rounds": 0,
+                    "status": "skipped",
+                    "reason": "max_total reached",
+                },
+                "stats": {
+                    "total_scraped": 0,
+                    "filtered_count": 0,
+                    "excluded_count": 0,
+                    "total_replies": 0,
+                    "posts_with_replies": 0,
+                },
+                "date_range": {"days": 0, "newest": None, "oldest": None},
+                "filter": {"type": filter_desc, "cutoff_date": cutoff_utc.isoformat() if cutoff_utc else None},
+                "posts": [],
+            }
+        
         if not username:
             return {
                 "meta": {
@@ -989,6 +1049,12 @@ async def scrape_single_account_v2(
                 seen_root_post_ids: set = set()
                 
                 for post in filtered_posts:
+                    # 공유 카운터로 max_total 체크
+                    if shared_counter and await shared_counter.is_full():
+                        print(f"[batch] @{username}: 스크래핑 중 max_total 도달, 조기 종료")
+                        break
+                    
+                    # 로컬 max_total_posts 체크
                     if total_collected >= max_total_posts:
                         break
                     
@@ -1012,7 +1078,17 @@ async def scrape_single_account_v2(
                         
                         thread_data["created_at"] = post.get("created_at")
                         replies_count = len(thread_data.get("replies", []))
-                        total_collected += 1 + replies_count
+                        post_total = 1 + replies_count
+                        
+                        # 공유 카운터에 추가 시도
+                        if shared_counter:
+                            added = await shared_counter.try_add(post_total)
+                            if added == 0:
+                                print(f"[batch] @{username}: 공유 카운터 가득 참, 조기 종료")
+                                break
+                            # 부분적으로만 추가된 경우도 일단 포함 (이미 수집됨)
+                        
+                        total_collected += post_total
                         total_replies_collected += replies_count
                         if replies_count > 0:
                             posts_with_replies_count += 1
@@ -1020,6 +1096,12 @@ async def scrape_single_account_v2(
                         post_responses.append(thread_data)
                         
                     except Exception as e:
+                        # 공유 카운터에 1 추가
+                        if shared_counter:
+                            added = await shared_counter.try_add(1)
+                            if added == 0:
+                                break
+                        
                         post_responses.append({
                             "post_id": None,
                             "text": post.get("text", ""),
@@ -1038,7 +1120,17 @@ async def scrape_single_account_v2(
                 total_replies_collected = 0
                 posts_with_replies_count = 0
                 for post in filtered_posts[:max_total_posts]:
+                    # 공유 카운터 체크
+                    if shared_counter and await shared_counter.is_full():
+                        break
+                    
                     try:
+                        # 공유 카운터에 1 추가
+                        if shared_counter:
+                            added = await shared_counter.try_add(1)
+                            if added == 0:
+                                break
+                        
                         post_responses.append({
                             "text": post.get("text") or "",
                             "created_at": post.get("created_at"),
@@ -1122,7 +1214,7 @@ async def scrape_single_account_v2(
         async with semaphore:
             print(f"[batch] 스크래핑 시작: @{username}")
             result = await do_scrape()
-            print(f"[batch] 스크래핑 완료: @{username} ({result['meta']['duration_seconds']}초)")
+            print(f"[batch] 스크래핑 완료: @{username} ({result['meta']['duration_seconds']}초, {result['stats']['filtered_count']}개)")
             return result
     else:
         return await do_scrape()
@@ -1249,18 +1341,18 @@ async def batch_scrape_legacy(request: BatchScrapeRequest):
 
 @app.post("/batch-scrape")
 async def batch_scrape_v2(request: BatchScrapeRequestV2):
-    """배치 스크래핑 - 계정별/전체 최대 갯수 제한
+    """배치 스크래핑 - 모든 계정 병렬 처리 + 전체 max_total 실시간 제어
     
     여러 계정을 한 번에 스크래핑합니다.
+    - 모든 계정을 동시에 병렬 처리 (최대 5개 동시 실행)
     - max_per_account: 계정별 최대 스크랩 갯수
-    - max_total: 전체 최대 갯수 도달 시 중지
-    - 동시 최대 5개 계정 병렬 처리
+    - max_total: 전체 최대 갯수 - 실시간으로 체크하여 도달 시 조기 종료
     
     파라미터:
     - usernames: 사용자명 리스트 (필수)
     - since_days: 최근 N일 이내 (기본: 1일)
     - max_per_account: 계정별 최대 스크랩 갯수 (기본: 10)
-    - max_total: 전체 최대 스크랩 갯수 (기본: 300, 도달 시 중지)
+    - max_total: 전체 최대 스크랩 갯수 (기본: 300, 실시간 체크)
     - include_replies: 답글 포함 여부 (기본: True)
     - max_reply_depth: 답글 깊이 (기본: 1)
     
@@ -1282,53 +1374,47 @@ async def batch_scrape_v2(request: BatchScrapeRequestV2):
         
         unique_usernames = list(dict.fromkeys(request.usernames))
         
-        print(f"[batch] 배치 스크래핑 시작: {len(unique_usernames)}개 계정")
-        print(f"[batch] 설정: max_per_account={request.max_per_account}, max_total={request.max_total}")
+        print(f"[batch] 🚀 병렬 배치 스크래핑 시작: {len(unique_usernames)}개 계정")
+        print(f"[batch] 설정: max_per_account={request.max_per_account}, max_total={request.max_total}, 동시처리=5")
         
-        results = []
-        total_collected = 0  # 전체 수집된 게시물 수
-        skipped_accounts = []  # max_total 도달로 스킵된 계정
+        # 공유 카운터 생성 (max_total 실시간 제어용)
+        shared_counter = SharedCounter(max_total=request.max_total)
         
-        # 순차 처리 (max_total 제어를 위해)
-        for i, username in enumerate(unique_usernames):
-            # max_total 도달 시 중지
-            if total_collected >= request.max_total:
-                skipped_accounts = unique_usernames[i:]
-                print(f"[batch] max_total({request.max_total}) 도달, 나머지 {len(skipped_accounts)}개 계정 스킵")
-                break
-            
-            # 이 계정에서 수집할 수 있는 최대 갯수 계산
-            remaining = request.max_total - total_collected
-            account_max = min(request.max_per_account, remaining)
-            
-            print(f"[batch] {i+1}/{len(unique_usernames)} @{username} 스크래핑 시작 (max={account_max}, 현재 총 {total_collected}개)")
-            
-            result = await scrape_single_account_v2(
+        # 세마포어로 동시성 5개 제한
+        semaphore = asyncio.Semaphore(5)
+        
+        # 모든 계정에 대해 병렬 태스크 생성
+        tasks = [
+            scrape_single_account_v2(
                 username=username,
-                max_posts=account_max,  # 계정별 최대 갯수
+                max_posts=request.max_per_account,
                 max_scroll_rounds=50,
                 since_days=request.since_days,
                 since_date=request.since_date,
                 include_replies=request.include_replies,
                 max_reply_depth=request.max_reply_depth,
-                max_total_posts=account_max,
-                semaphore=None,
+                max_total_posts=request.max_per_account,
+                semaphore=semaphore,
+                shared_counter=shared_counter,
             )
-            
-            results.append(result)
-            account_collected = result["stats"]["filtered_count"]
-            total_collected += account_collected
-            
-            print(f"[batch] @{username} 완료: {account_collected}개 수집 (총 {total_collected}개)")
+            for username in unique_usernames
+        ]
+        
+        # 모든 태스크 병렬 실행
+        results = await asyncio.gather(*tasks)
         
         # 전체 메타데이터 계산
         batch_duration = round(time.time() - batch_start_time, 2)
         success_count = sum(1 for r in results if r["meta"]["status"] == "success")
-        failed_count = len(results) - success_count
+        skipped_count = sum(1 for r in results if r["meta"]["status"] == "skipped")
+        failed_count = sum(1 for r in results if r["meta"]["status"] == "failed")
         total_scraped = sum(r["stats"]["total_scraped"] for r in results)
         total_filtered = sum(r["stats"]["filtered_count"] for r in results)
         total_excluded = sum(r["stats"]["excluded_count"] for r in results)
         total_replies = sum(r["stats"]["total_replies"] for r in results)
+        
+        # 스킵된 계정 목록
+        skipped_usernames = [r["meta"]["username"] for r in results if r["meta"]["status"] == "skipped"]
         
         # 전체 날짜 범위 계산
         all_dates = []
@@ -1347,24 +1433,28 @@ async def batch_scrape_v2(request: BatchScrapeRequestV2):
             overall_newest = overall_oldest = None
             overall_days = 0
         
-        print(f"[batch] 배치 스크래핑 완료: {success_count}/{len(results)} 성공, {batch_duration}초 소요")
+        print(f"[batch] ✅ 병렬 배치 스크래핑 완료!")
+        print(f"[batch]    성공: {success_count}, 스킵: {skipped_count}, 실패: {failed_count}")
+        print(f"[batch]    총 수집: {total_filtered}개, 소요시간: {batch_duration}초")
         
         response = {
             "total_meta": {
                 "accounts_requested": len(unique_usernames),
                 "accounts_processed": len(results),
-                "accounts_skipped": len(skipped_accounts),
-                "skipped_usernames": skipped_accounts,
+                "accounts_skipped": skipped_count,
+                "skipped_usernames": skipped_usernames,
                 "success_count": success_count,
                 "failed_count": failed_count,
                 "total_duration_seconds": batch_duration,
                 "total_collected": total_filtered,
+                "max_total_reached": shared_counter.count >= request.max_total,
                 "total_replies": total_replies,
                 "settings": {
                     "max_per_account": request.max_per_account,
                     "max_total": request.max_total,
                     "since_days": request.since_days,
                     "include_replies": request.include_replies,
+                    "concurrency": 5,
                 },
                 "date_range": {
                     "days": overall_days,

@@ -612,7 +612,28 @@ async def scrape_thread_with_replies(
                 # 방어적 처리 (API 레이어에서는 ge=1이지만 내부 호출 대비)
                 candidate_posts = []
 
-            # 답글을 root에 연결 (작성자 기반 필터링 제거: 스레드의 reply는 작성자와 무관하게 모두 포함)
+            # =============================
+            # 작성자 필터링: 루트 게시물 작성자의 답글(셀프 스레드)만 수집
+            #
+            # 루트 게시물 작성자와 동일한 작성자의 답글만 포함합니다.
+            # 다른 사용자의 답글은 제외됩니다.
+            # =============================
+            root_author_name = root_post.get("author")
+            if root_author_name:
+                # 대소문자 무시 비교
+                root_author_lower = root_author_name.lower()
+                same_author_replies = [
+                    reply for reply in candidate_posts 
+                    if reply.get("author") and reply.get("author").lower() == root_author_lower
+                ]
+                excluded_count = len(candidate_posts) - len(same_author_replies)
+                if excluded_count > 0:
+                    print(f"[scraper] 작성자 필터링: {len(candidate_posts)}개 중 {len(same_author_replies)}개만 포함 (다른 작성자 {excluded_count}개 제외)")
+                candidate_posts = same_author_replies
+            else:
+                print(f"[scraper] 경고: 루트 게시물 작성자를 알 수 없어 필터링 불가")
+
+            # 답글을 root에 연결 (루트 작성자의 답글만 포함)
             root_post["replies"] = candidate_posts
             root_post["total_replies_count"] = len(candidate_posts)
 

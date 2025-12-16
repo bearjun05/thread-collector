@@ -298,24 +298,21 @@ async def root():
     """API 루트 엔드포인트"""
     return {
         "message": "Threads Collector API",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "endpoints": {
-            "GET /scrape": "⭐ 메인 API - 사용자명만 입력하면 스레드 + 모든 답글 수집 (기본: 최근 1일)",
-            "GET /search-users": "사용자 검색 (자동완성) - 검색어로 Threads 사용자 찾기",
-            "GET /scrape-thread": "개별 게시물과 모든 답글 수집 (URL로 요청)",
-            "POST /scrape-thread": "개별 게시물과 모든 답글 수집 (JSON body)",
-            "POST /scrape-with-replies": "프로필 게시물 + 각 게시물의 답글 수집",
-            "POST /internal/batch-scrape": "내부 사용자용 - 계정 리스트를 받아 배치 스크래핑",
+            "GET /scrape": "⭐ 단일 계정 스크래핑 - 메타데이터 포함",
+            "POST /batch-scrape": "⭐ 배치 스크래핑 - 여러 계정 동시 처리 (최대 5개 병렬)",
+            "GET /search-users": "사용자 검색 (자동완성)",
+            "GET /scrape-thread": "개별 게시물과 답글 수집",
             "GET /health": "서버 상태 확인",
         },
         "quick_start": {
-            "example": "GET /scrape?username=zuck",
-            "description": "사용자명만 입력하면 최근 1일 동안의 모든 게시물과 답글을 자동 수집",
+            "single": "GET /scrape?username=zuck&since_days=7",
+            "batch": "POST /batch-scrape {\"usernames\": [\"zuck\", \"meta\"], \"since_days\": 7}",
         },
-        "options": {
-            "since_days": "기간 설정 (기본: 1일, 예: since_days=7 → 일주일)",
-            "include_replies": "답글 포함 여부 (기본: true)",
-            "max_reply_depth": "답글 깊이 (기본: 1 - 루트 + 직접 reply)",
+        "response_structure": {
+            "single": "{ meta, stats, date_range, filter, posts }",
+            "batch": "{ total_meta, results: [{ meta, stats, ... }, ...] }",
         },
     }
 
@@ -896,6 +893,159 @@ async def scrape_post(request: ScrapeRequest):
         raise HTTPException(status_code=500, detail=error_detail)
 
 
+async def scrape_single_account_v2(
+    username: str,
+    max_posts: Optional[int],
+    max_scroll_rounds: int,
+    since_days: Optional[int] = None,
+    since_date: Optional[str] = None,
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> Dict[str, Any]:
+    """단일 계정 스크래핑 헬퍼 함수 (새로운 응답 구조)"""
+    import time
+    start_time = time.time()
+    username = username.lstrip("@")
+    cutoff_utc = compute_cutoff_utc(since_days=since_days, since_date=since_date)
+    
+    # 필터 설명 생성
+    if since_days:
+        filter_desc = f"최근 {since_days}일 이내"
+    elif since_date:
+        filter_desc = f"{since_date} 이후"
+    else:
+        filter_desc = None
+    
+    async def do_scrape():
+        if not username:
+            return {
+                "meta": {
+                    "username": username,
+                    "scraped_at": datetime.now(KST).isoformat(),
+                    "duration_seconds": 0,
+                    "scroll_rounds": 0,
+                    "status": "failed",
+                    "error": "사용자명이 비어있습니다",
+                },
+                "stats": {
+                    "total_scraped": 0,
+                    "filtered_count": 0,
+                    "excluded_count": 0,
+                    "total_replies": 0,
+                    "posts_with_replies": 0,
+                },
+                "date_range": {"days": 0, "newest": None, "oldest": None},
+                "filter": {"type": filter_desc, "cutoff_date": cutoff_utc.isoformat() if cutoff_utc else None},
+                "posts": [],
+            }
+        
+        try:
+            scrape_result = await scrape_threads_profile(
+                username=username,
+                max_posts=max_posts,
+                max_scroll_rounds=max_scroll_rounds,
+                cutoff_utc=cutoff_utc,
+            )
+            posts = scrape_result["posts"]
+            scroll_rounds = scrape_result["scroll_rounds"]
+            
+            total_before_filter = len(posts)
+            
+            # 날짜 필터 적용
+            filtered_posts = filter_posts_by_date(posts, since_days=since_days, since_date=since_date)
+            
+            # 게시물 응답 생성
+            post_responses = []
+            for post in filtered_posts:
+                try:
+                    post_responses.append({
+                        "text": post.get("text") or "",
+                        "created_at": post.get("created_at"),
+                        "url": post.get("url") or "",
+                    })
+                except Exception:
+                    continue
+            
+            duration = round(time.time() - start_time, 2)
+            
+            # 날짜 범위 계산
+            post_dates = [parse_datetime(p["created_at"]) for p in post_responses if p.get("created_at")]
+            post_dates = [d for d in post_dates if d is not None]
+            if post_dates:
+                newest_date = max(post_dates)
+                oldest_date = min(post_dates)
+                date_range_days = (newest_date - oldest_date).days
+                newest_date_str = newest_date.isoformat()
+                oldest_date_str = oldest_date.isoformat()
+            else:
+                date_range_days = 0
+                newest_date_str = oldest_date_str = None
+            
+            # 상태 결정
+            if len(post_responses) == 0:
+                status = "failed" if total_before_filter == 0 else "success"
+            else:
+                status = "success"
+            
+            return {
+                "meta": {
+                    "username": username,
+                    "scraped_at": datetime.now(KST).isoformat(),
+                    "duration_seconds": duration,
+                    "scroll_rounds": scroll_rounds,
+                    "status": status,
+                },
+                "stats": {
+                    "total_scraped": total_before_filter,
+                    "filtered_count": len(post_responses),
+                    "excluded_count": total_before_filter - len(post_responses),
+                    "total_replies": 0,
+                    "posts_with_replies": 0,
+                },
+                "date_range": {
+                    "days": date_range_days,
+                    "newest": newest_date_str,
+                    "oldest": oldest_date_str,
+                },
+                "filter": {
+                    "type": filter_desc,
+                    "cutoff_date": cutoff_utc.isoformat() if cutoff_utc else None,
+                },
+                "posts": post_responses,
+            }
+        except Exception as e:
+            duration = round(time.time() - start_time, 2)
+            return {
+                "meta": {
+                    "username": username,
+                    "scraped_at": datetime.now(KST).isoformat(),
+                    "duration_seconds": duration,
+                    "scroll_rounds": 0,
+                    "status": "failed",
+                    "error": str(e),
+                },
+                "stats": {
+                    "total_scraped": 0,
+                    "filtered_count": 0,
+                    "excluded_count": 0,
+                    "total_replies": 0,
+                    "posts_with_replies": 0,
+                },
+                "date_range": {"days": 0, "newest": None, "oldest": None},
+                "filter": {"type": filter_desc, "cutoff_date": cutoff_utc.isoformat() if cutoff_utc else None},
+                "posts": [],
+            }
+    
+    # Semaphore로 동시성 제한
+    if semaphore:
+        async with semaphore:
+            print(f"[batch] 스크래핑 시작: @{username}")
+            result = await do_scrape()
+            print(f"[batch] 스크래핑 완료: @{username} ({result['meta']['duration_seconds']}초)")
+            return result
+    else:
+        return await do_scrape()
+
+
 async def scrape_single_account(
     username: str,
     max_posts: Optional[int],
@@ -903,7 +1053,7 @@ async def scrape_single_account(
     since_days: Optional[int] = None,
     since_date: Optional[str] = None,
 ) -> BatchScrapeItem:
-    """단일 계정 스크래핑 헬퍼 함수"""
+    """단일 계정 스크래핑 헬퍼 함수 (레거시 호환용)"""
     username = username.lstrip("@")
     scraped_at = datetime.now(KST).isoformat()
     
@@ -980,21 +1130,8 @@ async def scrape_single_account(
 
 
 @app.post("/internal/batch-scrape", response_model=BatchScrapeResponse)
-async def batch_scrape(request: BatchScrapeRequest):
-    """배치 스크래핑 요청 (내부 사용자용)
-    
-    여러 계정을 한 번에 스크래핑하여 리스트로 반환합니다.
-    계정들은 병렬로 처리됩니다.
-    
-    예시:
-    ```json
-    {
-        "usernames": ["zuck", "meta", "instagram"],
-        "max_posts": 10,
-        "since_days": 7
-    }
-    ```
-    """
+async def batch_scrape_legacy(request: BatchScrapeRequest):
+    """배치 스크래핑 요청 (레거시 호환용)"""
     try:
         if not request.usernames:
             raise HTTPException(status_code=400, detail="사용자명 리스트가 비어있습니다")
@@ -1025,6 +1162,127 @@ async def batch_scrape(request: BatchScrapeRequest):
             completed_at=datetime.now(KST).isoformat(),
         )
     except Exception as e:
+        raise HTTPException(status_code=500, detail=f"배치 스크래핑 중 오류 발생: {str(e)}")
+
+
+@app.post("/batch-scrape")
+async def batch_scrape_v2(request: BatchScrapeRequest):
+    """배치 스크래핑 (새로운 버전) - 동시 5개 병렬 처리
+    
+    여러 계정을 한 번에 스크래핑합니다.
+    - 동시 최대 5개 계정 병렬 처리 (Semaphore)
+    - 전체 메타데이터 포함
+    - 깔끔한 응답 구조
+    
+    예시:
+    ```json
+    {
+        "usernames": ["zuck", "meta", "instagram", "threads", "facebookapp"],
+        "max_posts": 10,
+        "since_days": 7
+    }
+    ```
+    
+    응답:
+    ```json
+    {
+        "total_meta": {
+            "accounts_count": 5,
+            "success_count": 4,
+            "failed_count": 1,
+            "total_duration_seconds": 45.2,
+            "total_scraped": 120,
+            "total_filtered": 35,
+            "total_excluded": 85,
+            "completed_at": "2025-12-16T11:00:00+09:00"
+        },
+        "results": [...]
+    }
+    ```
+    """
+    import time
+    batch_start_time = time.time()
+    
+    try:
+        if not request.usernames:
+            raise HTTPException(status_code=400, detail="사용자명 리스트가 비어있습니다")
+        
+        unique_usernames = list(dict.fromkeys(request.usernames))
+        
+        # 동시 5개 병렬 처리 제한
+        MAX_CONCURRENT = 5
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+        
+        print(f"[batch] 배치 스크래핑 시작: {len(unique_usernames)}개 계정 (동시 최대 {MAX_CONCURRENT}개)")
+        
+        tasks = [
+            scrape_single_account_v2(
+                username=username,
+                max_posts=request.max_posts,
+                max_scroll_rounds=request.max_scroll_rounds,
+                since_days=request.since_days,
+                since_date=request.since_date,
+                semaphore=semaphore,
+            )
+            for username in unique_usernames
+        ]
+        
+        results = await asyncio.gather(*tasks)
+        
+        # 전체 메타데이터 계산
+        batch_duration = round(time.time() - batch_start_time, 2)
+        success_count = sum(1 for r in results if r["meta"]["status"] == "success")
+        failed_count = len(results) - success_count
+        total_scraped = sum(r["stats"]["total_scraped"] for r in results)
+        total_filtered = sum(r["stats"]["filtered_count"] for r in results)
+        total_excluded = sum(r["stats"]["excluded_count"] for r in results)
+        total_replies = sum(r["stats"]["total_replies"] for r in results)
+        
+        # 전체 날짜 범위 계산
+        all_dates = []
+        for r in results:
+            if r["date_range"]["newest"]:
+                all_dates.append(parse_datetime(r["date_range"]["newest"]))
+            if r["date_range"]["oldest"]:
+                all_dates.append(parse_datetime(r["date_range"]["oldest"]))
+        all_dates = [d for d in all_dates if d is not None]
+        
+        if all_dates:
+            overall_newest = max(all_dates).isoformat()
+            overall_oldest = min(all_dates).isoformat()
+            overall_days = (max(all_dates) - min(all_dates)).days
+        else:
+            overall_newest = overall_oldest = None
+            overall_days = 0
+        
+        print(f"[batch] 배치 스크래핑 완료: {success_count}/{len(results)} 성공, {batch_duration}초 소요")
+        
+        response = {
+            "total_meta": {
+                "accounts_count": len(results),
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "total_duration_seconds": batch_duration,
+                "total_scraped": total_scraped,
+                "total_filtered": total_filtered,
+                "total_excluded": total_excluded,
+                "total_replies": total_replies,
+                "date_range": {
+                    "days": overall_days,
+                    "newest": overall_newest,
+                    "oldest": overall_oldest,
+                },
+                "completed_at": datetime.now(KST).isoformat(),
+            },
+            "results": results,
+        }
+        
+        return JSONResponse(content=response)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"배치 스크래핑 오류:")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"배치 스크래핑 중 오류 발생: {str(e)}")
 
 

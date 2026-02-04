@@ -1243,7 +1243,10 @@ def admin_refresh_rss_cache(
             usernames_set = {u.lstrip("@") for u in payload.usernames}
             targets = [a for a in accounts if a["username"] in usernames_set]
         for acc in targets:
+            # delete existing cache first, then recreate
+            conn.execute("DELETE FROM rss_feed_cache WHERE username = ?", (acc["username"],))
             refresh_rss_cache_for_account(conn, acc["id"], acc["username"])
+        conn.commit()
         return {"status": "ok", "updated": len(targets)}
     finally:
         conn.close()

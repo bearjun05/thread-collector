@@ -372,6 +372,32 @@ def _extract_author_from_url(url: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def _clean_text(raw: str) -> str:
+    if not raw:
+        return ""
+    banned_exact = {
+        "translate",
+        "seetranslation",
+        "translatemore",
+        "번역",
+        "번역보기",
+        "번역더보기",
+        "원문보기",
+    }
+    cleaned_lines = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        normalized = re.sub(r"[^a-zA-Z0-9가-힣]+", "", stripped).lower()
+        if not normalized:
+            continue
+        if normalized in banned_exact or "translatemore" in normalized:
+            continue
+        cleaned_lines.append(stripped)
+    return "\n".join(cleaned_lines).strip()
+
+
 async def _parse_single_post(node, seen_ids: set) -> Optional[Dict[str, Any]]:
     """단일 게시물 노드에서 데이터 추출."""
     try:
@@ -418,6 +444,7 @@ async def _parse_single_post(node, seen_ids: set) -> Optional[Dict[str, Any]]:
             text_content = await content_div.inner_text()
         else:
             text_content = await node.inner_text()
+        text_content = _clean_text(text_content or "")
         
         # 답글 여부 힌트 (프로필 피드에서 root/reply 구분용)
         is_reply = False

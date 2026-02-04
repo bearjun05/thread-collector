@@ -2102,15 +2102,15 @@ async def scrape_get(
             def convert_replies(replies: List[Dict]) -> List[ReplyPost]:
                 result = []
                 for r in replies:
-                result.append(ReplyPost(
-                    post_id=r.get("post_id"),
-                    text=r.get("text", ""),
-                    created_at=r.get("created_at"),
-                    url=r.get("url", ""),
-                    author=r.get("author"),
-                    media=r.get("media", []),
-                    replies=convert_replies(r.get("replies", [])),
-                ))
+                    result.append(ReplyPost(
+                        post_id=r.get("post_id"),
+                        text=r.get("text", ""),
+                        created_at=r.get("created_at"),
+                        url=r.get("url", ""),
+                        author=r.get("author"),
+                        media=r.get("media", []),
+                        replies=convert_replies(r.get("replies", [])),
+                    ))
                 return result
             
             thread_responses = []

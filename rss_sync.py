@@ -74,7 +74,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # If legacy cache with `id` exists, drop/recreate (cache can be rebuilt)
     if "id" in cols:
         conn.execute("DROP TABLE IF EXISTS rss_feed_cache")
-        conn.executescript(\"\"\"\n        CREATE TABLE IF NOT EXISTS rss_feed_cache (\n          username TEXT NOT NULL,\n          limit_count INTEGER NOT NULL,\n          etag TEXT NOT NULL,\n          last_modified TEXT,\n          xml TEXT NOT NULL,\n          updated_at TEXT NOT NULL,\n          PRIMARY KEY (username, limit_count)\n        );\n        \"\"\")
+        conn.executescript(
+            """
+        CREATE TABLE IF NOT EXISTS rss_feed_cache (
+          username TEXT NOT NULL,
+          limit_count INTEGER NOT NULL,
+          etag TEXT NOT NULL,
+          last_modified TEXT,
+          xml TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (username, limit_count)
+        );
+        """
+        )
 
 
 def load_accounts(conn: sqlite3.Connection, only_active: bool = True) -> List[Dict[str, Any]]:

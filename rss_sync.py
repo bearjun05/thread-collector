@@ -120,6 +120,22 @@ def _xml_escape(text: str) -> str:
     )
 
 
+def _format_text_html(text: str) -> str:
+    escaped = _xml_escape(text or "")
+    return escaped.replace("\n", "<br/>")
+
+
+def _build_description_html(root_text: str, replies: List[Dict[str, Any]]) -> str:
+    parts = []
+    if (root_text or "").strip():
+        parts.append(_format_text_html(root_text.strip()))
+    for rep in replies or []:
+        rep_text = (rep.get("text") or "").strip()
+        if rep_text:
+            parts.append(_format_text_html(rep_text))
+    return "<br/><br/>".join(parts)
+
+
 def _get_cache_policy(conn: sqlite3.Connection) -> Dict[str, Any]:
     row = conn.execute(
         "SELECT enabled, ttl_seconds, updated_at FROM rss_cache_policy WHERE id = 1"
@@ -173,24 +189,11 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
     for r in rows:
         post_id = r.get("post_id")
         url = r.get("url")
-        text = r.get("text") or ""
+        root_text = r.get("text") or ""
         created_at = r.get("created_at")
         replies = r.get("replies", [])
         media = r.get("media", [])
-        parts = []
-        if text.strip():
-            parts.append(text.strip())
-        if media:
-            parts.extend([m.get("url") for m in media if m.get("url")])
-        if replies:
-            for rep in replies:
-                rep_text = (rep.get("text") or "").strip()
-                if rep_text:
-                    parts.append(rep_text)
-                rep_media = rep.get("media", [])
-                if rep_media:
-                    parts.extend([m.get("url") for m in rep_media if m.get("url")])
-        text = "\n\n".join([p for p in parts if p])
+        desc_html = _build_description_html(root_text, replies)
         media_urls = []
         if media:
             media_urls.extend([m.get("url") for m in media if m.get("url")])
@@ -204,8 +207,14 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
         media_urls = [u for u in media_urls if u and not (u in seen_media or seen_media.add(u))]
         created_dt = _parse_dt(created_at) if created_at else None
         pub_date = format_datetime(created_dt) if created_dt else format_datetime(datetime.now(timezone.utc))
-        title = (text or "").strip().split("\n")[0][:80] or "(no title)"
-        desc = (text or "").strip()
+        title_source = root_text.strip()
+        if not title_source and replies:
+            for rep in replies:
+                rep_text = (rep.get("text") or "").strip()
+                if rep_text:
+                    title_source = rep_text
+                    break
+        title = (title_source or "(no title)").split("\n")[0][:80]
         enclosures = "".join(
             f"<enclosure url=\"{_xml_escape(mu)}\" length=\"0\" type=\"{_xml_escape(_guess_mime(mu))}\" />"
             for mu in media_urls
@@ -216,7 +225,7 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
             f"<link>{_xml_escape(url)}</link>"
             f"<guid>{_xml_escape(post_id or url)}</guid>"
             f"<pubDate>{pub_date}</pubDate>"
-            f"<description>{_xml_escape(desc)}</description>"
+            f"<description>{desc_html}</description>"
             f"{enclosures}"
             f"</item>"
         )

@@ -279,6 +279,22 @@ def _xml_escape(text: str) -> str:
     )
 
 
+def _format_text_html(text: str) -> str:
+    escaped = _xml_escape(text or "")
+    return escaped.replace("\n", "<br/>")
+
+
+def _build_description_html(root_text: str, replies: List[tuple]) -> str:
+    parts = []
+    if (root_text or "").strip():
+        parts.append(_format_text_html(root_text.strip()))
+    for rr in replies:
+        rep_text = (rr[0] or "").strip()
+        if rep_text:
+            parts.append(_format_text_html(rep_text))
+    return "<br/><br/>".join(parts)
+
+
 def _parse_media_json(raw: Optional[str]) -> List[Dict[str, Any]]:
     if not raw:
         return []
@@ -888,23 +904,17 @@ def rss_feed(
                 "ORDER BY created_at ASC",
                 (src[0], post_id),
             ).fetchall()
-            parts = []
-            if (text or "").strip():
-                parts.append((text or "").strip())
             media_urls = []
             if root_media:
                 media_urls.extend([m.get("url") for m in root_media if m.get("url")])
             for rr in replies:
-                rep_text = (rr[0] or "").strip()
-                if rep_text:
-                    parts.append(rep_text)
                 rep_media = _parse_media_json(rr[1])
                 if rep_media:
                     media_urls.extend([m.get("url") for m in rep_media if m.get("url")])
             # dedupe media
             seen_media = set()
             media_urls = [u for u in media_urls if u and not (u in seen_media or seen_media.add(u))]
-            text = "\n\n".join([p for p in parts if p])
+            desc_html = _build_description_html(text or "", replies)
             created_dt = None
             try:
                 created_dt = date_parser.parse(created_at) if created_at else None
@@ -913,8 +923,14 @@ def rss_feed(
             if created_dt and created_dt.tzinfo is None:
                 created_dt = created_dt.replace(tzinfo=timezone.utc)
             pub_date = format_datetime(created_dt) if created_dt else format_datetime(datetime.now(timezone.utc))
-            title = (text or "").strip().split("\n")[0][:80] or "(no title)"
-            desc = (text or "").strip()
+            title_source = (text or "").strip()
+            if not title_source:
+                for rr in replies:
+                    rep_text = (rr[0] or "").strip()
+                    if rep_text:
+                        title_source = rep_text
+                        break
+            title = (title_source or "(no title)").split("\n")[0][:80]
             enclosures = "".join(
                 f"<enclosure url=\"{_xml_escape(mu)}\" length=\"0\" type=\"{_xml_escape(_guess_mime(mu))}\" />"
                 for mu in media_urls
@@ -925,7 +941,7 @@ def rss_feed(
                 f"<link>{_xml_escape(url)}</link>"
                 f"<guid>{_xml_escape(post_id or url)}</guid>"
                 f"<pubDate>{pub_date}</pubDate>"
-                f"<description>{_xml_escape(desc)}</description>"
+                f"<description>{desc_html}</description>"
                 f"{enclosures}"
                 f"</item>"
             )

@@ -92,9 +92,9 @@ def _get_schedule(conn: sqlite3.Connection) -> Dict[str, Any]:
     try:
         hh, mm = start_time_utc.split(":")
         kst_dt = datetime(2000, 1, 1, int(hh), int(mm), tzinfo=timezone.utc).astimezone(KST)
-        start_time_kst = f\"{kst_dt.hour:02d}:{kst_dt.minute:02d}\"
+        start_time_kst = f"{kst_dt.hour:02d}:{kst_dt.minute:02d}"
     except Exception:
-        start_time_kst = \"09:00\"
+        start_time_kst = "09:00"
     return {
         "is_active": bool(row[0]),
         "interval_minutes": row[1],
@@ -1364,11 +1364,11 @@ def admin_token_logs_csv(credentials: HTTPBasicCredentials = Depends(security)):
                 r[4] or "",
                 (r[5] or "").replace("\n", " ").replace("\r", " "),
                 str(r[6]),
-                r[7] or \"\",
+                r[7] or "",
             ]
-            lines.append(\",\".join([f\"\\\"{c}\\\"\" if \",\" in c else c for c in row]))
-        csv_text = \"\\n\".join(lines)
-        return PlainTextResponse(csv_text, media_type=\"text/csv\")
+            lines.append(",".join([f"\"{c}\"" if "," in c else c for c in row]))
+        csv_text = "\n".join(lines)
+        return PlainTextResponse(csv_text, media_type="text/csv")
     finally:
         conn.close()
 

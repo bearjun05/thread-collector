@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional, Literal
 from fastapi import FastAPI, HTTPException, Query, Depends, Request
 from fastapi import BackgroundTasks
 from fastapi.responses import JSONResponse
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from dateutil import parser as date_parser
@@ -961,7 +961,11 @@ def rss_feed(
                 if cached_last:
                     headers["Last-Modified"] = cached_last
                 _log_token_request(conn, token_id, username, request, 200)
-                return PlainTextResponse(cached_xml, media_type="application/rss+xml", headers=headers)
+                return Response(
+                    content=cached_xml.encode("utf-8"),
+                    media_type="application/rss+xml; charset=utf-8",
+                    headers=headers,
+                )
 
         xml = (
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
@@ -1008,7 +1012,11 @@ def rss_feed(
                 conn.commit()
             except Exception:
                 pass
-        return PlainTextResponse(xml, media_type="application/rss+xml", headers=headers)
+        return Response(
+            content=xml.encode("utf-8"),
+            media_type="application/rss+xml; charset=utf-8",
+            headers=headers,
+        )
     finally:
         conn.close()
 

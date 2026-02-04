@@ -56,6 +56,14 @@ uv run python app.py
 - Swagger UI: http://localhost:8001/docs
 - ReDoc: http://localhost:8001/redoc
 - Admin UI: http://localhost:8001/admin (Basic Auth 필요)
+  - Dashboard: `/admin`
+  - Posts: `/admin/posts` (스크랩 결과 조회)
+  - Tokens: `/admin/tokens`
+  - Settings: `/admin/settings`
+
+**Admin 로그**
+- 스크랩 로그는 KST 기준으로 기록됩니다.
+- 로그에 계정 성공/실패 수, 게시물 수, 소요 시간 등이 요약됩니다.
 
 ---
 

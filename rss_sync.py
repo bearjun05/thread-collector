@@ -9,8 +9,7 @@ from typing import List, Dict, Any, Optional
 from dateutil import parser as date_parser
 from email.utils import format_datetime
 
-from scraper import scrape_threads_profile
-
+from scraper import scrape_threads_profile_with_replies
 
 DB_PATH = os.environ.get("RSS_DB_PATH", os.path.join("db", "rss_cache.db"))
 SCHEMA_PATH = os.environ.get("RSS_SCHEMA_PATH", os.path.join("db", "schema.sql"))
@@ -53,6 +52,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(feed_sources)").fetchall()}
     if "is_active" not in cols:
         conn.execute("ALTER TABLE feed_sources ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    if "include_replies" not in cols:
+        conn.execute("ALTER TABLE feed_sources ADD COLUMN include_replies INTEGER NOT NULL DEFAULT 1")
+    if "max_reply_depth" not in cols:
+        conn.execute("ALTER TABLE feed_sources ADD COLUMN max_reply_depth INTEGER NOT NULL DEFAULT 1")
 
     # Ensure rss_schedule row exists
     rows = conn.execute("SELECT id FROM rss_schedule WHERE id = 1").fetchall()
@@ -147,7 +150,7 @@ def _parse_cache_limits() -> List[int]:
     return sorted(set(limits)) or [50]
 
 
-def _build_rss_xml(username: str, rows: List[tuple]) -> tuple[str, str, Optional[str]]:
+def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str, Optional[str]]:
     channel_title = f"{username} Threads Feed"
     channel_link = f"https://www.threads.com/@{username}"
     channel_desc = f"Threads posts scraped for @{username}"
@@ -156,14 +159,22 @@ def _build_rss_xml(username: str, rows: List[tuple]) -> tuple[str, str, Optional
     last_modified = None
     if rows:
         try:
-            dt = _parse_dt(rows[0][3])
+            dt = _parse_dt(rows[0]["created_at"])
             if dt:
                 last_modified = format_datetime(dt)
         except Exception:
             last_modified = None
 
     for r in rows:
-        post_id, url, text, created_at = r
+        post_id = r.get("post_id")
+        url = r.get("url")
+        text = r.get("text") or ""
+        created_at = r.get("created_at")
+        replies = r.get("replies", [])
+        if replies:
+            reply_texts = [rep.get("text") or "" for rep in replies if rep.get("text") is not None]
+            if reply_texts:
+                text = text + "\n" + "\n".join(reply_texts)
         created_dt = _parse_dt(created_at) if created_at else None
         pub_date = format_datetime(created_dt) if created_dt else format_datetime(datetime.now(timezone.utc))
         title = (text or "").strip().split("\n")[0][:80] or "(no title)"
@@ -192,17 +203,43 @@ def _build_rss_xml(username: str, rows: List[tuple]) -> tuple[str, str, Optional
     return xml, etag, last_modified
 
 
+def _fetch_roots_with_replies(conn: sqlite3.Connection, source_id: int, limit: int) -> List[Dict[str, Any]]:
+    roots = conn.execute(
+        "SELECT post_id, url, text, created_at FROM posts "
+        "WHERE source_id = ? AND is_reply = 0 ORDER BY created_at DESC LIMIT ?",
+        (source_id, limit),
+    ).fetchall()
+    results = []
+    for r in roots:
+        post_id, url, text, created_at = r
+        replies = conn.execute(
+            "SELECT post_id, url, text, created_at FROM posts "
+            "WHERE source_id = ? AND is_reply = 1 AND parent_post_id = ? "
+            "ORDER BY created_at ASC",
+            (source_id, post_id),
+        ).fetchall()
+        results.append(
+            {
+                "post_id": post_id,
+                "url": url,
+                "text": text,
+                "created_at": created_at,
+                "replies": [
+                    {"post_id": rr[0], "url": rr[1], "text": rr[2], "created_at": rr[3]}
+                    for rr in replies
+                ],
+            }
+        )
+    return results
+
+
 def refresh_rss_cache_for_account(conn: sqlite3.Connection, source_id: int, username: str) -> None:
     policy = _get_cache_policy(conn)
     if not policy["enabled"]:
         return
     limits = _parse_cache_limits()
     for limit in limits:
-        rows = conn.execute(
-            "SELECT post_id, url, text, created_at FROM posts "
-            "WHERE source_id = ? ORDER BY created_at DESC LIMIT ?",
-            (source_id, limit),
-        ).fetchall()
+        rows = _fetch_roots_with_replies(conn, source_id, limit)
         xml, etag, last_modified = _build_rss_xml(username, rows)
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
@@ -216,13 +253,23 @@ def refresh_rss_cache_for_account(conn: sqlite3.Connection, source_id: int, user
 def load_accounts(conn: sqlite3.Connection, only_active: bool = True) -> List[Dict[str, Any]]:
     if only_active:
         rows = conn.execute(
-            "SELECT id, username FROM feed_sources WHERE is_active = 1 ORDER BY id ASC"
+            "SELECT id, username, include_replies, max_reply_depth "
+            "FROM feed_sources WHERE is_active = 1 ORDER BY id ASC"
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, username FROM feed_sources ORDER BY id ASC"
+            "SELECT id, username, include_replies, max_reply_depth "
+            "FROM feed_sources ORDER BY id ASC"
         ).fetchall()
-    return [{"id": r[0], "username": r[1]} for r in rows]
+    return [
+        {
+            "id": r[0],
+            "username": r[1],
+            "include_replies": bool(r[2]) if r[2] is not None else True,
+            "max_reply_depth": r[3] if r[3] is not None else 1,
+        }
+        for r in rows
+    ]
 
 
 def get_latest_created_at(conn: sqlite3.Connection, source_id: int) -> Optional[datetime]:
@@ -233,6 +280,45 @@ def get_latest_created_at(conn: sqlite3.Connection, source_id: int) -> Optional[
     return _parse_dt(row[0]) if row and row[0] else None
 
 
+def _extract_post_id(post: Dict[str, Any]) -> Optional[str]:
+    pid = post.get("post_id")
+    if pid:
+        return pid
+    url = post.get("url") or ""
+    if "/post/" in url:
+        return url.split("/post/")[-1].split("?")[0]
+    return url or None
+
+
+def _flatten_posts(posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    flat = []
+    for p in posts:
+        root_id = _extract_post_id(p) or p.get("url")
+        flat.append(
+            {
+                "post_id": root_id,
+                "url": p.get("url"),
+                "text": p.get("text"),
+                "created_at": p.get("created_at"),
+                "is_reply": False,
+                "parent_post_id": None,
+            }
+        )
+        for rep in p.get("replies", []) or []:
+            reply_id = _extract_post_id(rep) or rep.get("url")
+            flat.append(
+                {
+                    "post_id": reply_id,
+                    "url": rep.get("url"),
+                    "text": rep.get("text"),
+                    "created_at": rep.get("created_at"),
+                    "is_reply": True,
+                    "parent_post_id": root_id,
+                }
+            )
+    return flat
+
+
 def insert_posts(
     conn: sqlite3.Connection,
     source_id: int,
@@ -240,7 +326,7 @@ def insert_posts(
 ) -> int:
     now = datetime.now(timezone.utc).isoformat()
     payload = []
-    for p in posts:
+    for p in _flatten_posts(posts):
         payload.append(
             (
                 source_id,
@@ -250,7 +336,7 @@ def insert_posts(
                 p.get("created_at"),
                 now,
                 1 if p.get("is_reply") else 0,
-                None,
+                p.get("parent_post_id"),
             )
         )
     if not payload:
@@ -270,15 +356,20 @@ async def scrape_one(
     semaphore: asyncio.Semaphore,
     username: str,
     cutoff_utc: Optional[datetime],
+    include_replies: bool,
+    max_reply_depth: int,
 ) -> List[Dict[str, Any]]:
     async with semaphore:
-        result = await scrape_threads_profile(
+        result = await scrape_threads_profile_with_replies(
             username=username,
             max_posts=None,
             max_scroll_rounds=50,
+            include_replies=include_replies,
+            max_reply_depth=max_reply_depth,
+            max_total_posts=300,
             cutoff_utc=cutoff_utc,
         )
-        return result.get("posts", [])
+        return result or []
 
 
 async def run_once(usernames: Optional[List[str]] = None) -> None:
@@ -302,7 +393,13 @@ async def run_once(usernames: Optional[List[str]] = None) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=SCRAPE_WINDOW_HOURS)
         for acc in accounts:
             tasks.append(
-                scrape_one(semaphore, acc["username"], cutoff)
+                scrape_one(
+                    semaphore,
+                    acc["username"],
+                    cutoff,
+                    acc.get("include_replies", True),
+                    acc.get("max_reply_depth", 1),
+                )
             )
 
         _log(

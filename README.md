@@ -70,6 +70,9 @@ uv run python app.py
 - 기본적으로 최근 24시간 이내 게시물만 스크랩합니다.
 - 변경이 필요하면 `RSS_SCRAPE_WINDOW_HOURS` 환경변수로 조정할 수 있습니다.
 
+**계정별 답글 수집**
+- Admin > Accounts에서 계정별로 답글 수집 ON/OFF 및 깊이(`max_reply_depth`)를 설정할 수 있습니다.
+
 ---
 
 ## API 엔드포인트

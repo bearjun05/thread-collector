@@ -114,6 +114,11 @@
         <div class="row" style="margin-bottom: 10px;">
           <input id="newUsername" placeholder="username (no @)" />
           <input id="newDisplay" placeholder="display name (optional)" />
+          <select id="newReplies">
+            <option value="true" selected>Replies ON</option>
+            <option value="false">Replies OFF</option>
+          </select>
+          <input id="newDepth" type="number" min="1" max="10" value="1" style="width: 80px;" />
           <button onclick="addAccount()">Add</button>
         </div>
         <table>
@@ -122,6 +127,8 @@
               <th>ID</th>
               <th>Username</th>
               <th>Status</th>
+              <th>Replies</th>
+              <th>Depth</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -209,8 +216,12 @@
           <td>${a.id}</td>
           <td>@${a.username}</td>
           <td><span class="pill ${a.is_active ? '' : 'off'}">${a.is_active ? 'ON' : 'OFF'}</span></td>
+          <td><span class="pill ${a.include_replies ? '' : 'off'}">${a.include_replies ? 'ON' : 'OFF'}</span></td>
+          <td><input id="depth-${a.id}" type="number" min="1" max="10" value="${a.max_reply_depth || 1}" style="width: 70px;" /></td>
           <td>
             <button class="secondary" onclick="toggleAccount(${a.id}, ${a.is_active})">Toggle</button>
+            <button class="secondary" onclick="toggleReplies(${a.id}, ${a.include_replies})">Replies</button>
+            <button class="secondary" onclick="updateDepth(${a.id})">Save</button>
             <button class="danger" onclick="deleteAccount(${a.id})">Delete</button>
           </td>
         `;
@@ -221,14 +232,22 @@
     async function addAccount() {
       const username = document.getElementById('newUsername').value.trim();
       const display_name = document.getElementById('newDisplay').value.trim();
+      const include_replies = document.getElementById('newReplies').value === 'true';
+      const max_reply_depth = parseInt(document.getElementById('newDepth').value, 10) || 1;
       if (!username) return alert('username required');
       await api('/admin/api/accounts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, display_name: display_name || null })
+        body: JSON.stringify({
+          username,
+          display_name: display_name || null,
+          include_replies,
+          max_reply_depth
+        })
       });
       document.getElementById('newUsername').value = '';
       document.getElementById('newDisplay').value = '';
+      document.getElementById('newDepth').value = '1';
       await loadAccounts();
     }
 
@@ -244,6 +263,25 @@
     async function deleteAccount(id) {
       if (!confirm('Delete this account?')) return;
       await api(`/admin/api/accounts/${id}`, { method: 'DELETE' });
+      await loadAccounts();
+    }
+
+    async function toggleReplies(id, current) {
+      await api(`/admin/api/accounts/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ include_replies: !current })
+      });
+      await loadAccounts();
+    }
+
+    async function updateDepth(id) {
+      const val = parseInt(document.getElementById(`depth-${id}`).value, 10) || 1;
+      await api(`/admin/api/accounts/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_reply_depth: val })
+      });
       await loadAccounts();
     }
 

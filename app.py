@@ -480,12 +480,16 @@ class AdminAccountCreate(BaseModel):
     username: str = Field(..., description="Threads username")
     display_name: Optional[str] = None
     profile_url: Optional[str] = None
+    include_replies: Optional[bool] = True
+    max_reply_depth: Optional[int] = Field(1, ge=1, le=10)
 
 
 class AdminAccountUpdate(BaseModel):
     is_active: Optional[bool] = None
     display_name: Optional[str] = None
     profile_url: Optional[str] = None
+    include_replies: Optional[bool] = None
+    max_reply_depth: Optional[int] = Field(None, ge=1, le=10)
 
 
 class AdminScrapeRequest(BaseModel):
@@ -818,9 +822,9 @@ def rss_feed(
         if not src:
             raise HTTPException(status_code=404, detail="account not found")
         
-        rows = conn.execute(
+        roots = conn.execute(
             "SELECT post_id, url, text, created_at FROM posts "
-            "WHERE source_id = ? ORDER BY created_at DESC LIMIT ?",
+            "WHERE source_id = ? AND is_reply = 0 ORDER BY created_at DESC LIMIT ?",
             (src[0], limit),
         ).fetchall()
         
@@ -829,8 +833,17 @@ def rss_feed(
         channel_desc = f"Threads posts scraped for @{username}"
         
         items = []
-        for r in rows:
+        for r in roots:
             post_id, url, text, created_at = r
+            replies = conn.execute(
+                "SELECT text FROM posts WHERE source_id = ? AND is_reply = 1 AND parent_post_id = ? "
+                "ORDER BY created_at ASC",
+                (src[0], post_id),
+            ).fetchall()
+            if replies:
+                reply_texts = [rr[0] or "" for rr in replies if rr[0] is not None]
+                if reply_texts:
+                    text = (text or "") + "\n" + "\n".join(reply_texts)
             created_dt = None
             try:
                 created_dt = date_parser.parse(created_at) if created_at else None
@@ -896,9 +909,9 @@ def rss_feed(
         )
         etag = hashlib.sha256(xml.encode("utf-8")).hexdigest()
         last_modified = None
-        if rows:
+        if roots:
             try:
-                last_modified_dt = date_parser.parse(rows[0][3]) if rows[0][3] else None
+                last_modified_dt = date_parser.parse(roots[0][3]) if roots[0][3] else None
                 if last_modified_dt and last_modified_dt.tzinfo is None:
                     last_modified_dt = last_modified_dt.replace(tzinfo=timezone.utc)
                 if last_modified_dt:
@@ -999,7 +1012,7 @@ def admin_list_accounts(credentials: HTTPBasicCredentials = Depends(security)):
     conn = _get_db_conn()
     try:
         rows = conn.execute(
-            "SELECT id, username, display_name, profile_url, is_active, created_at "
+            "SELECT id, username, display_name, profile_url, is_active, include_replies, max_reply_depth, created_at "
             "FROM feed_sources ORDER BY id ASC"
         ).fetchall()
         data = [
@@ -1009,7 +1022,9 @@ def admin_list_accounts(credentials: HTTPBasicCredentials = Depends(security)):
                 "display_name": r[2],
                 "profile_url": r[3],
                 "is_active": bool(r[4]),
-                "created_at": r[5],
+                "include_replies": bool(r[5]),
+                "max_reply_depth": r[6],
+                "created_at": r[7],
             }
             for r in rows
         ]
@@ -1029,9 +1044,17 @@ def admin_add_account(payload: AdminAccountCreate, credentials: HTTPBasicCredent
     try:
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT OR IGNORE INTO feed_sources (username, display_name, profile_url, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (username, payload.display_name, profile_url, now),
+            "INSERT OR IGNORE INTO feed_sources "
+            "(username, display_name, profile_url, include_replies, max_reply_depth, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                username,
+                payload.display_name,
+                profile_url,
+                1 if payload.include_replies else 0,
+                payload.max_reply_depth or 1,
+                now,
+            ),
         )
         conn.commit()
         return {"status": "ok"}
@@ -1051,6 +1074,12 @@ def admin_update_account(
     if payload.is_active is not None:
         fields.append("is_active = ?")
         values.append(1 if payload.is_active else 0)
+    if payload.include_replies is not None:
+        fields.append("include_replies = ?")
+        values.append(1 if payload.include_replies else 0)
+    if payload.max_reply_depth is not None:
+        fields.append("max_reply_depth = ?")
+        values.append(payload.max_reply_depth)
     if payload.display_name is not None:
         fields.append("display_name = ?")
         values.append(payload.display_name)

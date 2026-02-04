@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS feed_sources (
   username TEXT NOT NULL UNIQUE,
   display_name TEXT,
   profile_url TEXT UNIQUE,
+  include_replies INTEGER NOT NULL DEFAULT 1,
+  max_reply_depth INTEGER NOT NULL DEFAULT 1,
   is_active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL
 );

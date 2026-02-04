@@ -33,7 +33,7 @@
 - `ENABLE_INTERNAL_SCHEDULER=1` 설정 시 API 서버 내부에서 스케줄 실행
 - 관리자 UI에서 interval/ON-OFF 조정 가능
 - 단일 워커 환경에서만 사용 권장
- - 시작 시간(start_time)은 UTC 기준 HH:MM
+ - 시작 시간(start_time)은 **KST 입력 → UTC 저장** 방식
 
 ## 배치 수집 흐름 (의사 코드)
 ```

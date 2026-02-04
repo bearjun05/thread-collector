@@ -588,6 +588,9 @@ docker run -d -p 8001:8001 thread-collector
 ## Admin UI
 
 관리자 UI는 `/admin`에서 접근합니다. Basic Auth가 필요합니다.
+- `/admin` (Dashboard)
+- `/admin/tokens` (Tokens)
+- `/admin/settings` (Settings)
 
 환경 변수:
 - `ADMIN_USER` (기본: `admin`)
@@ -606,7 +609,7 @@ docker run -d -p 8001:8001 thread-collector
 ### 옵션 B: 내부 스케줄러
 - `ENABLE_INTERNAL_SCHEDULER=1` 설정 시 API 서버 내부에서 스케줄 실행
 - 관리자 UI에서 interval/ON-OFF 조정 가능
- - 시작 시간(start_time)은 UTC 기준 HH:MM
+ - 시작 시간(start_time)은 **KST 입력 → UTC 저장**
 
 ### systemd 제어 (Admin UI)
 - `ENABLE_SYSTEMD_CONTROL=1` 설정 시 `/admin`에서 systemd timer 상태/시작/중지 가능

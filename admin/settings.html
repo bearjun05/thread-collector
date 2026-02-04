@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Thread Collector Admin - Settings</title>
+  <style>
+    :root {
+      --bg: #f5f1e8;
+      --ink: #1a1a1a;
+      --muted: #5a5a5a;
+      --accent: #204c3d;
+      --accent-2: #e7d9b9;
+      --danger: #a63c3c;
+      --panel: #fffdf7;
+      --border: #d9cfb8;
+      --font: "IBM Plex Sans", "Space Grotesk", "Segoe UI", sans-serif;
+    }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 600px at 10% -10%, #fff7e6 0%, transparent 60%),
+                  radial-gradient(900px 500px at 110% 10%, #f0f7f1 0%, transparent 60%),
+                  var(--bg);
+      color: var(--ink);
+      font-family: var(--font);
+    }
+    .layout { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+    .sidebar { padding: 20px; border-right: 1px solid var(--border); background: #fbf7ee; }
+    .sidebar h1 { font-size: 16px; margin: 0 0 16px; }
+    .nav a { display: block; padding: 8px 10px; margin-bottom: 6px; text-decoration: none; color: var(--ink); border-radius: 8px; }
+    .nav a.active { background: var(--accent); color: #fff; }
+    main { padding: 20px 28px 32px; }
+    header { margin-bottom: 12px; }
+    header h2 { margin: 0; font-size: 18px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px; box-shadow: 0 6px 20px rgba(0,0,0,0.04); margin-bottom: 16px; }
+    h3 { margin: 0 0 12px; font-size: 16px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    input, button, select { font-family: var(--font); border-radius: 10px; border: 1px solid var(--border); padding: 8px 10px; font-size: 14px; background: #fff; }
+    button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+    button.secondary { background: var(--accent-2); color: var(--ink); border-color: var(--accent-2); }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>Thread Collector</h1>
+      <nav class="nav">
+        <a href="/admin">Dashboard</a>
+        <a href="/admin/tokens">Tokens</a>
+        <a class="active" href="/admin/settings">Settings</a>
+      </nav>
+    </aside>
+    <main>
+      <header>
+        <h2>Settings</h2>
+      </header>
+
+      <section class="card">
+        <h3>Rate Limit</h3>
+        <div class="row" style="margin-bottom: 8px;">
+          <label>Window (sec):</label>
+          <input id="rateWindow" type="number" min="60" max="3600" style="width: 90px;" />
+          <label>Max Requests:</label>
+          <input id="rateMax" type="number" min="1" max="10000" style="width: 90px;" />
+          <button class="secondary" onclick="updateRateLimit()">Save</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>RSS Cache Policy</h3>
+        <div class="row" style="margin-bottom: 8px;">
+          <label>Enabled:</label>
+          <select id="cacheEnabled">
+            <option value="true">ON</option>
+            <option value="false">OFF</option>
+          </select>
+          <label>TTL (sec):</label>
+          <input id="cacheTtl" type="number" min="30" max="86400" style="width: 110px;" />
+          <button class="secondary" onclick="updateCachePolicy()">Save</button>
+          <button class="secondary" onclick="clearRssCache()">Clear Cache</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    async function api(path, options = {}) {
+      const res = await fetch(path, options);
+      if (!res.ok) {
+        const text = await res.text();
+        alert("API error: " + text);
+        throw new Error(text);
+      }
+      return res;
+    }
+
+    async function refreshAll() {
+      await loadRateLimit();
+      await loadCachePolicy();
+    }
+
+    async function loadRateLimit() {
+      const res = await api('/admin/api/rate-limit');
+      const data = await res.json();
+      document.getElementById('rateWindow').value = data.window_seconds;
+      document.getElementById('rateMax').value = data.max_requests;
+    }
+
+    async function updateRateLimit() {
+      const window_seconds = parseInt(document.getElementById('rateWindow').value, 10);
+      const max_requests = parseInt(document.getElementById('rateMax').value, 10);
+      await api('/admin/api/rate-limit', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ window_seconds, max_requests })
+      });
+      await loadRateLimit();
+    }
+
+    async function loadCachePolicy() {
+      const res = await api('/admin/api/rss-cache-policy');
+      const data = await res.json();
+      document.getElementById('cacheEnabled').value = data.enabled ? 'true' : 'false';
+      document.getElementById('cacheTtl').value = data.ttl_seconds;
+    }
+
+    async function updateCachePolicy() {
+      const enabled = document.getElementById('cacheEnabled').value === 'true';
+      const ttl_seconds = parseInt(document.getElementById('cacheTtl').value, 10);
+      await api('/admin/api/rss-cache-policy', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled, ttl_seconds })
+      });
+      await loadCachePolicy();
+    }
+
+    async function clearRssCache() {
+      if (!confirm('Clear RSS cache?')) return;
+      await api('/admin/api/rss-cache/clear', { method: 'POST' });
+      alert('Cache cleared');
+    }
+
+    refreshAll();
+  </script>
+</body>
+</html>

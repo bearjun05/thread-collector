@@ -124,6 +124,26 @@ def _get_rate_limit(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
+def _get_cache_policy(conn: sqlite3.Connection) -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT enabled, ttl_seconds, updated_at FROM rss_cache_policy WHERE id = 1"
+    ).fetchone()
+    if not row:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO rss_cache_policy (id, enabled, ttl_seconds, updated_at) "
+            "VALUES (1, 1, 300, ?)",
+            (now,),
+        )
+        conn.commit()
+        row = (1, 300, now)
+    return {
+        "enabled": bool(row[0]),
+        "ttl_seconds": row[1],
+        "updated_at": row[2],
+    }
+
+
 def _log_token_request(
     conn: sqlite3.Connection,
     token_id: int,
@@ -500,6 +520,11 @@ class AdminRateLimitUpdate(BaseModel):
     max_requests: Optional[int] = Field(None, ge=1, le=10000)
 
 
+class AdminCachePolicyUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    ttl_seconds: Optional[int] = Field(None, ge=30, le=86400)
+
+
 class BatchScrapeItem(BaseModel):
     """배치 스크래핑 결과 항목"""
     username: str
@@ -837,20 +862,38 @@ def rss_feed(
                 f"</item>"
             )
         
-        cache_row = conn.execute(
-            "SELECT etag, last_modified, xml FROM rss_feed_cache WHERE username = ? AND limit_count = ?",
-            (username, limit),
-        ).fetchone()
+        cache_policy = _get_cache_policy(conn)
+        cache_row = None
+        if cache_policy["enabled"]:
+            cache_row = conn.execute(
+                "SELECT etag, last_modified, xml, updated_at FROM rss_feed_cache WHERE username = ? AND limit_count = ?",
+                (username, limit),
+            ).fetchone()
         if cache_row:
-            cached_etag, cached_last, cached_xml = cache_row
-            inm = request.headers.get("if-none-match")
-            ims = request.headers.get("if-modified-since")
-            if inm and inm == cached_etag:
-                _log_token_request(conn, token_id, username, request, 304)
-                return PlainTextResponse("", status_code=304)
-            if ims and cached_last and ims == cached_last:
-                _log_token_request(conn, token_id, username, request, 304)
-                return PlainTextResponse("", status_code=304)
+            cached_etag, cached_last, cached_xml, cached_updated = cache_row
+            cache_ok = True
+            if cache_policy["ttl_seconds"] > 0 and cached_updated:
+                try:
+                    updated_dt = date_parser.parse(cached_updated)
+                    if updated_dt.tzinfo is None:
+                        updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+                    cache_ok = datetime.now(timezone.utc) - updated_dt <= timedelta(seconds=cache_policy["ttl_seconds"])
+                except Exception:
+                    cache_ok = False
+            if cache_ok:
+                inm = request.headers.get("if-none-match")
+                ims = request.headers.get("if-modified-since")
+                if inm and inm == cached_etag:
+                    _log_token_request(conn, token_id, username, request, 304)
+                    return PlainTextResponse("", status_code=304)
+                if ims and cached_last and ims == cached_last:
+                    _log_token_request(conn, token_id, username, request, 304)
+                    return PlainTextResponse("", status_code=304)
+                headers = {"ETag": cached_etag}
+                if cached_last:
+                    headers["Last-Modified"] = cached_last
+                _log_token_request(conn, token_id, username, request, 200)
+                return PlainTextResponse(cached_xml, media_type="application/rss+xml", headers=headers)
 
         xml = (
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
@@ -886,16 +929,17 @@ def rss_feed(
         if last_modified:
             headers["Last-Modified"] = last_modified
         _log_token_request(conn, token_id, username, request, 200)
-        try:
-            now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                "INSERT OR REPLACE INTO rss_feed_cache (username, limit_count, etag, last_modified, xml, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (username, limit, etag, last_modified, xml, now),
-            )
-            conn.commit()
-        except Exception:
-            pass
+        if cache_policy["enabled"]:
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "INSERT OR REPLACE INTO rss_feed_cache (username, limit_count, etag, last_modified, xml, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (username, limit, etag, last_modified, xml, now),
+                )
+                conn.commit()
+            except Exception:
+                pass
         return PlainTextResponse(xml, media_type="application/rss+xml", headers=headers)
     finally:
         conn.close()
@@ -934,6 +978,18 @@ async def root():
 def admin_ui(credentials: HTTPBasicCredentials = Depends(security)):
     _require_admin(credentials)
     return FileResponse("admin/index.html")
+
+
+@app.get("/admin/tokens")
+def admin_tokens_ui(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    return FileResponse("admin/tokens.html")
+
+
+@app.get("/admin/settings")
+def admin_settings_ui(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    return FileResponse("admin/settings.html")
 
 
 @app.get("/admin/api/accounts")
@@ -1335,6 +1391,48 @@ def admin_clear_rss_cache(credentials: HTTPBasicCredentials = Depends(security))
     conn = _get_db_conn()
     try:
         conn.execute("DELETE FROM rss_feed_cache")
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/rss-cache-policy")
+def admin_get_rss_cache_policy(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        return _get_cache_policy(conn)
+    finally:
+        conn.close()
+
+
+@app.patch("/admin/api/rss-cache-policy")
+def admin_update_rss_cache_policy(
+    payload: AdminCachePolicyUpdate,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        fields = []
+        values = []
+        if payload.ttl_seconds is not None:
+            fields.append("ttl_seconds = ?")
+            values.append(payload.ttl_seconds)
+        if payload.enabled is not None:
+            fields.append("enabled = ?")
+            values.append(1 if payload.enabled else 0)
+        if not fields:
+            return {"status": "no_change"}
+        now = datetime.now(timezone.utc).isoformat()
+        fields.append("updated_at = ?")
+        values.append(now)
+        values.append(1)
+        conn.execute(
+            f"UPDATE rss_cache_policy SET {', '.join(fields)} WHERE id = ?",
+            tuple(values),
+        )
         conn.commit()
         return {"status": "ok"}
     finally:

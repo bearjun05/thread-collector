@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Thread Collector Admin - Tokens</title>
+  <style>
+    :root {
+      --bg: #f5f1e8;
+      --ink: #1a1a1a;
+      --muted: #5a5a5a;
+      --accent: #204c3d;
+      --accent-2: #e7d9b9;
+      --danger: #a63c3c;
+      --panel: #fffdf7;
+      --border: #d9cfb8;
+      --font: "IBM Plex Sans", "Space Grotesk", "Segoe UI", sans-serif;
+    }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 600px at 10% -10%, #fff7e6 0%, transparent 60%),
+                  radial-gradient(900px 500px at 110% 10%, #f0f7f1 0%, transparent 60%),
+                  var(--bg);
+      color: var(--ink);
+      font-family: var(--font);
+    }
+    .layout { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+    .sidebar { padding: 20px; border-right: 1px solid var(--border); background: #fbf7ee; }
+    .sidebar h1 { font-size: 16px; margin: 0 0 16px; }
+    .nav a { display: block; padding: 8px 10px; margin-bottom: 6px; text-decoration: none; color: var(--ink); border-radius: 8px; }
+    .nav a.active { background: var(--accent); color: #fff; }
+    main { padding: 20px 28px 32px; }
+    header { margin-bottom: 12px; }
+    header h2 { margin: 0; font-size: 18px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px; box-shadow: 0 6px 20px rgba(0,0,0,0.04); margin-bottom: 16px; }
+    h3 { margin: 0 0 12px; font-size: 16px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    input, button, select { font-family: var(--font); border-radius: 10px; border: 1px solid var(--border); padding: 8px 10px; font-size: 14px; background: #fff; }
+    button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+    button.secondary { background: var(--accent-2); color: var(--ink); border-color: var(--accent-2); }
+    button.danger { background: var(--danger); border-color: var(--danger); }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; }
+    th { color: var(--muted); font-weight: 600; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #e8efe6; color: #215a43; }
+    .pill.off { background: #f3e3e3; color: #8c2c2c; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>Thread Collector</h1>
+      <nav class="nav">
+        <a href="/admin">Dashboard</a>
+        <a class="active" href="/admin/tokens">Tokens</a>
+        <a href="/admin/settings">Settings</a>
+      </nav>
+    </aside>
+    <main>
+      <header>
+        <h2>Tokens</h2>
+      </header>
+
+      <section class="card">
+        <h3>Token Management</h3>
+        <div class="row" style="margin-bottom: 8px;">
+          <input id="tokenScope" placeholder="scope: username or global" />
+          <button onclick="createToken()">Create</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Scope</th>
+              <th>Status</th>
+              <th>Token</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="tokensBody"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h3>Token Logs</h3>
+        <div class="row" style="margin-bottom: 8px;">
+          <select id="logLimit" onchange="loadTokenLogs()">
+            <option value="100">100</option>
+            <option value="200" selected>200</option>
+            <option value="500">500</option>
+          </select>
+          <button class="secondary" onclick="loadTokenLogs()">Reload</button>
+          <button class="secondary" onclick="exportTokenLogs()">Export CSV</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Scope</th>
+              <th>Username</th>
+              <th>Status</th>
+              <th>IP</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="tokenLogsBody"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h3>Invalid Token Logs</h3>
+        <div class="row" style="margin-bottom: 8px;">
+          <select id="invalidLogLimit" onchange="loadInvalidTokenLogs()">
+            <option value="100">100</option>
+            <option value="200" selected>200</option>
+            <option value="500">500</option>
+          </select>
+          <button class="secondary" onclick="loadInvalidTokenLogs()">Reload</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Token Hash</th>
+              <th>Username</th>
+              <th>Status</th>
+              <th>IP</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="invalidTokenLogsBody"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h3>Token Usage</h3>
+        <div class="row" style="margin-bottom: 8px;">
+          <select id="statsHours" onchange="loadTokenStats()">
+            <option value="6">6h</option>
+            <option value="24" selected>24h</option>
+            <option value="72">72h</option>
+          </select>
+          <button class="secondary" onclick="loadTokenStats()">Reload</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Token ID</th>
+              <th>Scope</th>
+              <th>Count</th>
+            </tr>
+          </thead>
+          <tbody id="tokenStatsBody"></tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    async function api(path, options = {}) {
+      const res = await fetch(path, options);
+      if (!res.ok) {
+        const text = await res.text();
+        alert("API error: " + text);
+        throw new Error(text);
+      }
+      return res;
+    }
+
+    async function refreshAll() {
+      await loadTokens();
+      await loadTokenLogs();
+      await loadInvalidTokenLogs();
+      await loadTokenStats();
+    }
+
+    async function loadTokens() {
+      const res = await api('/admin/api/tokens');
+      const data = await res.json();
+      const tbody = document.getElementById('tokensBody');
+      tbody.innerHTML = '';
+      data.tokens.forEach(t => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${t.id}</td>
+          <td>${t.scope}</td>
+          <td><span class="pill ${t.is_active ? '' : 'off'}">${t.is_active ? 'ON' : 'OFF'}</span></td>
+          <td><code>${t.token}</code></td>
+          <td>
+            <button class="secondary" onclick="toggleToken(${t.id}, ${t.is_active})">Toggle</button>
+            <button class="danger" onclick="deleteToken(${t.id})">Delete</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function createToken() {
+      const scope = document.getElementById('tokenScope').value.trim();
+      if (!scope) return alert('scope required');
+      const res = await api('/admin/api/tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope, is_active: true })
+      });
+      const data = await res.json();
+      alert('Token created: ' + data.token);
+      document.getElementById('tokenScope').value = '';
+      await loadTokens();
+    }
+
+    async function toggleToken(id, current) {
+      await api(`/admin/api/tokens/${id}?is_active=${!current}`, { method: 'PATCH' });
+      await loadTokens();
+    }
+
+    async function deleteToken(id) {
+      if (!confirm('Delete this token?')) return;
+      await api(`/admin/api/tokens/${id}`, { method: 'DELETE' });
+      await loadTokens();
+    }
+
+    async function loadTokenLogs() {
+      const limit = document.getElementById('logLimit').value;
+      const res = await api(`/admin/api/token-logs?limit=${limit}`);
+      const data = await res.json();
+      const tbody = document.getElementById('tokenLogsBody');
+      tbody.innerHTML = '';
+      data.logs.forEach(l => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${l.id}</td>
+          <td>${l.scope}</td>
+          <td>@${l.username}</td>
+          <td>${l.status_code}</td>
+          <td>${l.ip || ''}</td>
+          <td>${l.created_at}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function loadInvalidTokenLogs() {
+      const limit = document.getElementById('invalidLogLimit').value;
+      const res = await api(`/admin/api/invalid-token-logs?limit=${limit}`);
+      const data = await res.json();
+      const tbody = document.getElementById('invalidTokenLogsBody');
+      tbody.innerHTML = '';
+      data.logs.forEach(l => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${l.id}</td>
+          <td>${l.token_hash}</td>
+          <td>${l.username || ''}</td>
+          <td>${l.status_code}</td>
+          <td>${l.ip || ''}</td>
+          <td>${l.created_at}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function loadTokenStats() {
+      const hours = document.getElementById('statsHours').value;
+      const res = await api(`/admin/api/token-stats?hours=${hours}`);
+      const data = await res.json();
+      const tbody = document.getElementById('tokenStatsBody');
+      tbody.innerHTML = '';
+      data.stats.forEach(s => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${s.token_id}</td>
+          <td>${s.scope}</td>
+          <td>${s.count}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function exportTokenLogs() {
+      const res = await api('/admin/api/token-logs.csv');
+      const text = await res.text();
+      const blob = new Blob([text], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'token-logs.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    refreshAll();
+  </script>
+</body>
+</html>

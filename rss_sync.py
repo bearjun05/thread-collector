@@ -70,6 +70,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             "VALUES (1, 300, 60, ?)",
             (now,),
         )
+    rows = conn.execute("SELECT id FROM rss_cache_policy WHERE id = 1").fetchall()
+    if not rows:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO rss_cache_policy (id, enabled, ttl_seconds, updated_at) "
+            "VALUES (1, 1, 300, ?)",
+            (now,),
+        )
     cols = {r[1] for r in conn.execute("PRAGMA table_info(rss_feed_cache)").fetchall()}
     # If legacy cache with `id` exists, drop/recreate (cache can be rebuilt)
     if "id" in cols:

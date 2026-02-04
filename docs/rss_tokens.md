@@ -34,6 +34,11 @@
 ## CSV Export
 - 다운로드: `GET /admin/api/token-logs.csv`
 
+## RSS Cache Policy
+- 조회: `GET /admin/api/rss-cache-policy`
+- 변경: `PATCH /admin/api/rss-cache-policy`
+- 캐시 비우기: `POST /admin/api/rss-cache/clear`
+
 ## 사용 예시
 ```bash
 curl "http://localhost:8001/v2/rss?username=choi.openai&token=YOUR_TOKEN"

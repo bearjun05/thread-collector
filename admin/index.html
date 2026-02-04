@@ -25,38 +25,44 @@
       color: var(--ink);
       font-family: var(--font);
     }
-    header {
-      padding: 24px 28px 10px;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    header h1 {
-      margin: 0;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      font-size: 22px;
-    }
-    header small { color: var(--muted); }
-    main { padding: 20px 28px 32px; }
-    .grid {
+    .layout {
       display: grid;
-      grid-template-columns: 2fr 1fr;
-      gap: 16px;
+      grid-template-columns: 220px 1fr;
+      min-height: 100vh;
     }
-    @media (max-width: 1000px) {
-      .grid { grid-template-columns: 1fr; }
+    .sidebar {
+      padding: 20px;
+      border-right: 1px solid var(--border);
+      background: #fbf7ee;
     }
+    .sidebar h1 {
+      font-size: 16px;
+      margin: 0 0 16px;
+    }
+    .nav a {
+      display: block;
+      padding: 8px 10px;
+      margin-bottom: 6px;
+      text-decoration: none;
+      color: var(--ink);
+      border-radius: 8px;
+    }
+    .nav a.active {
+      background: var(--accent);
+      color: #fff;
+    }
+    main { padding: 20px 28px 32px; }
+    header { margin-bottom: 12px; }
+    header h2 { margin: 0; font-size: 18px; }
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 16px;
       box-shadow: 0 6px 20px rgba(0,0,0,0.04);
+      margin-bottom: 16px;
     }
-    h2 { margin: 0 0 12px; font-size: 16px; }
+    h3 { margin: 0 0 12px; font-size: 16px; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     input, button, select {
       font-family: var(--font);
@@ -77,59 +83,32 @@
       color: var(--ink);
       border-color: var(--accent-2);
     }
-    button.danger {
-      background: var(--danger);
-      border-color: var(--danger);
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 14px;
-    }
-    th, td {
-      border-bottom: 1px solid var(--border);
-      padding: 8px 6px;
-      text-align: left;
-    }
+    button.danger { background: var(--danger); border-color: var(--danger); }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; }
     th { color: var(--muted); font-weight: 600; }
-    .pill {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 999px;
-      font-size: 12px;
-      background: #e8efe6;
-      color: #215a43;
-    }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #e8efe6; color: #215a43; }
     .pill.off { background: #f3e3e3; color: #8c2c2c; }
-    pre {
-      background: #111;
-      color: #e6e6e6;
-      border-radius: 12px;
-      padding: 12px;
-      height: 320px;
-      overflow: auto;
-      font-size: 12px;
-      line-height: 1.4;
-    }
-    .section {
-      margin-top: 16px;
-    }
+    pre { background: #111; color: #e6e6e6; border-radius: 12px; padding: 12px; height: 320px; overflow: auto; font-size: 12px; line-height: 1.4; }
   </style>
 </head>
 <body>
-  <header>
-    <div>
-      <h1>Thread Collector Admin</h1>
-      <small>Accounts • Scheduler • Logs</small>
-    </div>
-    <div class="row">
-      <button class="secondary" onclick="refreshAll()">Refresh</button>
-    </div>
-  </header>
-  <main>
-    <div class="grid">
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>Thread Collector</h1>
+      <nav class="nav">
+        <a class="active" href="/admin">Dashboard</a>
+        <a href="/admin/tokens">Tokens</a>
+        <a href="/admin/settings">Settings</a>
+      </nav>
+    </aside>
+    <main>
+      <header>
+        <h2>Dashboard</h2>
+      </header>
+
       <section class="card">
-        <h2>Accounts</h2>
+        <h3>Accounts</h3>
         <div class="row" style="margin-bottom: 10px;">
           <input id="newUsername" placeholder="username (no @)" />
           <input id="newDisplay" placeholder="display name (optional)" />
@@ -149,16 +128,16 @@
       </section>
 
       <section class="card">
-        <h2>Scheduler</h2>
+        <h3>Scheduler</h3>
         <div class="row" style="margin-bottom: 10px;">
           <button onclick="scrapeAll()">Run All Now</button>
           <input id="scrapeUser" placeholder="username" />
           <button class="secondary" onclick="scrapeOne()">Run One</button>
         </div>
-        <div class="row section">
+        <div class="row" style="margin-bottom: 10px;">
           <label>Interval (min):</label>
           <input id="scheduleInterval" type="number" min="5" max="1440" style="width: 90px;" />
-          <label>Start (HH:MM):</label>
+          <label>Start (KST HH:MM):</label>
           <input id="scheduleTime" type="time" />
           <select id="scheduleActive">
             <option value="true">ON</option>
@@ -166,13 +145,15 @@
           </select>
           <button class="secondary" onclick="updateSchedule()">Save</button>
         </div>
-        <div class="row" style="margin-top: 6px; color: var(--muted);">
+        <div class="row" style="color: var(--muted);">
           <span>Next run:</span>
           <span id="nextRunAt">-</span>
         </div>
         <p style="color: var(--muted); margin-top: 6px;">Internal scheduler requires ENABLE_INTERNAL_SCHEDULER=1.</p>
+      </section>
 
-        <h2 style="margin-top: 18px;">Logs</h2>
+      <section class="card">
+        <h3>Logs</h3>
         <div class="row" style="margin-bottom: 8px;">
           <button class="secondary" onclick="loadLogs()">Reload Logs</button>
           <select id="logLines" onchange="loadLogs()">
@@ -182,17 +163,10 @@
           </select>
         </div>
         <pre id="logBox">Loading...</pre>
+      </section>
 
-        <h2 style="margin-top: 18px;">Rate Limit</h2>
-        <div class="row" style="margin-bottom: 8px;">
-          <label>Window (sec):</label>
-          <input id="rateWindow" type="number" min="60" max="3600" style="width: 90px;" />
-          <label>Max Requests:</label>
-          <input id="rateMax" type="number" min="1" max="10000" style="width: 90px;" />
-          <button class="secondary" onclick="updateRateLimit()">Save</button>
-        </div>
-
-        <h2 style="margin-top: 18px;">Systemd</h2>
+      <section class="card">
+        <h3>Systemd</h3>
         <div class="row" style="margin-bottom: 8px;">
           <button class="secondary" onclick="systemdStatus()">Status</button>
           <button onclick="systemdStart()">Start</button>
@@ -200,99 +174,9 @@
           <button class="secondary" onclick="systemdRestart()">Restart</button>
         </div>
         <pre id="systemdBox">(systemd status)</pre>
-
-        <h2 style="margin-top: 18px;">RSS Cache</h2>
-        <div class="row" style="margin-bottom: 8px;">
-          <button class="secondary" onclick="clearRssCache()">Clear Cache</button>
-        </div>
-
-        <h2 style="margin-top: 18px;">Tokens</h2>
-        <div class="row" style="margin-bottom: 8px;">
-          <input id="tokenScope" placeholder="scope: username or global" />
-          <button onclick="createToken()">Create</button>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Scope</th>
-              <th>Status</th>
-              <th>Token</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="tokensBody"></tbody>
-        </table>
-
-        <h2 style="margin-top: 18px;">Token Logs</h2>
-        <div class="row" style="margin-bottom: 8px;">
-          <select id="logLimit" onchange="loadTokenLogs()">
-            <option value="100">100</option>
-            <option value="200" selected>200</option>
-            <option value="500">500</option>
-          </select>
-          <button class="secondary" onclick="loadTokenLogs()">Reload</button>
-          <button class="secondary" onclick="exportTokenLogs()">Export CSV</button>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Scope</th>
-              <th>Username</th>
-              <th>Status</th>
-              <th>IP</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody id="tokenLogsBody"></tbody>
-        </table>
-
-        <h2 style="margin-top: 18px;">Invalid Token Logs</h2>
-        <div class="row" style="margin-bottom: 8px;">
-          <select id="invalidLogLimit" onchange="loadInvalidTokenLogs()">
-            <option value="100">100</option>
-            <option value="200" selected>200</option>
-            <option value="500">500</option>
-          </select>
-          <button class="secondary" onclick="loadInvalidTokenLogs()">Reload</button>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Token Hash</th>
-              <th>Username</th>
-              <th>Status</th>
-              <th>IP</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody id="invalidTokenLogsBody"></tbody>
-        </table>
-
-        <h2 style="margin-top: 18px;">Token Usage (Last 24h)</h2>
-        <div class="row" style="margin-bottom: 8px;">
-          <select id="statsHours" onchange="loadTokenStats()">
-            <option value="6">6h</option>
-            <option value="24" selected>24h</option>
-            <option value="72">72h</option>
-          </select>
-          <button class="secondary" onclick="loadTokenStats()">Reload</button>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Token ID</th>
-              <th>Scope</th>
-              <th>Count</th>
-            </tr>
-          </thead>
-          <tbody id="tokenStatsBody"></tbody>
-        </table>
       </section>
-    </div>
-  </main>
+    </main>
+  </div>
 
   <script>
     async function api(path, options = {}) {
@@ -309,11 +193,7 @@
       await loadAccounts();
       await loadLogs();
       await loadSchedule();
-      await loadTokens();
-      await loadTokenLogs();
-      await loadRateLimit();
-      await loadTokenStats();
-      await loadInvalidTokenLogs();
+      await systemdStatus();
     }
 
     async function loadAccounts() {
@@ -411,147 +291,6 @@
         body: JSON.stringify({ interval_minutes, is_active, start_time })
       });
       await loadSchedule();
-    }
-
-    async function loadTokens() {
-      const res = await api('/admin/api/tokens');
-      const data = await res.json();
-      const tbody = document.getElementById('tokensBody');
-      tbody.innerHTML = '';
-      data.tokens.forEach(t => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${t.id}</td>
-          <td>${t.scope}</td>
-          <td><span class="pill ${t.is_active ? '' : 'off'}">${t.is_active ? 'ON' : 'OFF'}</span></td>
-          <td><code>${t.token}</code></td>
-          <td>
-            <button class="secondary" onclick="toggleToken(${t.id}, ${t.is_active})">Toggle</button>
-            <button class="danger" onclick="deleteToken(${t.id})">Delete</button>
-          </td>
-        `;
-        tbody.appendChild(tr);
-      });
-    }
-
-    async function createToken() {
-      const scope = document.getElementById('tokenScope').value.trim();
-      if (!scope) return alert('scope required');
-      const res = await api('/admin/api/tokens', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope, is_active: true })
-      });
-      const data = await res.json();
-      alert('Token created: ' + data.token);
-      document.getElementById('tokenScope').value = '';
-      await loadTokens();
-    }
-
-    async function toggleToken(id, current) {
-      await api(`/admin/api/tokens/${id}?is_active=${!current}`, { method: 'PATCH' });
-      await loadTokens();
-    }
-
-    async function deleteToken(id) {
-      if (!confirm('Delete this token?')) return;
-      await api(`/admin/api/tokens/${id}`, { method: 'DELETE' });
-      await loadTokens();
-    }
-
-    async function loadTokenLogs() {
-      const limit = document.getElementById('logLimit').value;
-      const res = await api(`/admin/api/token-logs?limit=${limit}`);
-      const data = await res.json();
-      const tbody = document.getElementById('tokenLogsBody');
-      tbody.innerHTML = '';
-      data.logs.forEach(l => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${l.id}</td>
-          <td>${l.scope}</td>
-          <td>@${l.username}</td>
-          <td>${l.status_code}</td>
-          <td>${l.ip || ''}</td>
-          <td>${l.created_at}</td>
-        `;
-        tbody.appendChild(tr);
-      });
-    }
-
-    async function loadTokenStats() {
-      const hours = document.getElementById('statsHours').value;
-      const res = await api(`/admin/api/token-stats?hours=${hours}`);
-      const data = await res.json();
-      const tbody = document.getElementById('tokenStatsBody');
-      tbody.innerHTML = '';
-      data.stats.forEach(s => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${s.token_id}</td>
-          <td>${s.scope}</td>
-          <td>${s.count}</td>
-        `;
-        tbody.appendChild(tr);
-      });
-    }
-
-    async function loadRateLimit() {
-      const res = await api('/admin/api/rate-limit');
-      const data = await res.json();
-      document.getElementById('rateWindow').value = data.window_seconds;
-      document.getElementById('rateMax').value = data.max_requests;
-    }
-
-    async function updateRateLimit() {
-      const window_seconds = parseInt(document.getElementById('rateWindow').value, 10);
-      const max_requests = parseInt(document.getElementById('rateMax').value, 10);
-      await api('/admin/api/rate-limit', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ window_seconds, max_requests })
-      });
-      await loadRateLimit();
-    }
-
-    async function loadInvalidTokenLogs() {
-      const limit = document.getElementById('invalidLogLimit').value;
-      const res = await api(`/admin/api/invalid-token-logs?limit=${limit}`);
-      const data = await res.json();
-      const tbody = document.getElementById('invalidTokenLogsBody');
-      tbody.innerHTML = '';
-      data.logs.forEach(l => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${l.id}</td>
-          <td>${l.token_hash}</td>
-          <td>${l.username || ''}</td>
-          <td>${l.status_code}</td>
-          <td>${l.ip || ''}</td>
-          <td>${l.created_at}</td>
-        `;
-        tbody.appendChild(tr);
-      });
-    }
-
-    async function exportTokenLogs() {
-      const res = await api('/admin/api/token-logs.csv');
-      const text = await res.text();
-      const blob = new Blob([text], { type: 'text/csv' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'token-logs.csv';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    }
-
-    async function clearRssCache() {
-      if (!confirm('Clear RSS cache?')) return;
-      await api('/admin/api/rss-cache/clear', { method: 'POST' });
-      alert('Cache cleared');
     }
 
     async function systemdStatus() {

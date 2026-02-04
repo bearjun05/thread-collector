@@ -77,6 +77,13 @@ CREATE TABLE IF NOT EXISTS rss_feed_cache (
   PRIMARY KEY (username, limit_count)
 );
 
+CREATE TABLE IF NOT EXISTS rss_cache_policy (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  ttl_seconds INTEGER NOT NULL DEFAULT 300,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS rss_invalid_token_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token_hash TEXT NOT NULL,

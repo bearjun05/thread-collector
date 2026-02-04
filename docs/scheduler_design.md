@@ -33,7 +33,13 @@
 - `ENABLE_INTERNAL_SCHEDULER=1` 설정 시 API 서버 내부에서 스케줄 실행
 - 관리자 UI에서 interval/ON-OFF 조정 가능
 - 단일 워커 환경에서만 사용 권장
- - 시작 시간(start_time)은 **KST 입력 → UTC 저장** 방식
+- 시작 시간(start_time)은 **KST 입력 → UTC 저장** 방식
+- 실행 타이밍은 start_time 기준으로 정렬됨 (예: 03:00, 03:30, 04:00 ...)
+
+## systemd 제어 (Admin UI)
+- `ENABLE_SYSTEMD_CONTROL=1` 설정 시 `/admin`에서 systemd timer 상태/시작/중지 가능
+- interval/start_time 변경 시 systemd timer가 자동 업데이트됨
+- interval이 60으로 나누어지지 않는 경우, systemd는 start_time + interval 방식으로 동작
 
 ## 배치 수집 흐름 (의사 코드)
 ```

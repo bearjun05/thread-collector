@@ -74,7 +74,7 @@ def _tail_log(path: str, lines: int = 200) -> str:
         return ""
 
 
-def _get_schedule(conn: sqlite3.Connection) -> Dict[str, Any]:
+def _get_schedule(conn: sqlite3.Connection, display_kst: bool = True) -> Dict[str, Any]:
     row = conn.execute(
         "SELECT is_active, interval_minutes, start_time, last_run_at, updated_at FROM rss_schedule WHERE id = 1"
     ).fetchone()
@@ -88,17 +88,19 @@ def _get_schedule(conn: sqlite3.Connection) -> Dict[str, Any]:
         conn.commit()
         row = (1, 30, "09:00", None, now)
     start_time_utc = row[2]
-    # Convert UTC HH:MM -> KST HH:MM for admin display
-    try:
-        hh, mm = start_time_utc.split(":")
-        kst_dt = datetime(2000, 1, 1, int(hh), int(mm), tzinfo=timezone.utc).astimezone(KST)
-        start_time_kst = f"{kst_dt.hour:02d}:{kst_dt.minute:02d}"
-    except Exception:
-        start_time_kst = "09:00"
+    start_time_value = start_time_utc
+    if display_kst:
+        try:
+            hh, mm = start_time_utc.split(":")
+            kst_dt = datetime(2000, 1, 1, int(hh), int(mm), tzinfo=timezone.utc).astimezone(KST)
+            start_time_value = f"{kst_dt.hour:02d}:{kst_dt.minute:02d}"
+        except Exception:
+            start_time_value = "09:00"
     return {
         "is_active": bool(row[0]),
         "interval_minutes": row[1],
-        "start_time": start_time_kst,
+        "start_time": start_time_value,
+        "start_time_utc": start_time_utc,
         "last_run_at": row[3],
         "updated_at": row[4],
     }
@@ -187,29 +189,28 @@ def _log_invalid_token(
         pass
 
 
-def _compute_next_run(schedule: Dict[str, Any]) -> Optional[str]:
+def _compute_schedule_times(
+    now_utc: datetime, start_time_utc: str, interval_minutes: int
+) -> tuple[Optional[datetime], datetime]:
+    try:
+        hh, mm = start_time_utc.split(":")
+        start_today = now_utc.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+    except Exception:
+        start_today = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    if now_utc < start_today:
+        return None, start_today
+    delta_minutes = int((now_utc - start_today).total_seconds() // 60)
+    steps = delta_minutes // max(1, interval_minutes)
+    prev = start_today + timedelta(minutes=steps * interval_minutes)
+    return prev, prev + timedelta(minutes=interval_minutes)
+
+
+def _compute_next_run(schedule: Dict[str, Any], start_time_utc: str) -> Optional[str]:
     if not schedule.get("is_active"):
         return None
     now = datetime.now(timezone.utc)
-    start_time = schedule.get("start_time") or "09:00"
-    try:
-        hh, mm = start_time.split(":")
-        start_dt = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-    except Exception:
-        start_dt = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    if now < start_dt:
-        return start_dt.isoformat()
-    last = schedule.get("last_run_at")
-    last_dt = None
-    if last:
-        try:
-            last_dt = date_parser.parse(last)
-        except Exception:
-            last_dt = None
-    interval = schedule.get("interval_minutes") or 30
-    if last_dt:
-        return (last_dt + timedelta(minutes=interval)).isoformat()
-    return now.isoformat()
+    _, next_dt = _compute_schedule_times(now, start_time_utc, schedule.get("interval_minutes") or 30)
+    return next_dt.astimezone(KST).isoformat()
 
 
 async def _scheduler_loop() -> None:
@@ -218,7 +219,7 @@ async def _scheduler_loop() -> None:
         await asyncio.sleep(30)
         try:
             conn = _get_db_conn()
-            sched = _get_schedule(conn)
+            sched = _get_schedule(conn, display_kst=False)
             conn.close()
             if not sched["is_active"]:
                 continue
@@ -229,29 +230,17 @@ async def _scheduler_loop() -> None:
                     last_dt = date_parser.parse(last)
                 except Exception:
                     last_dt = None
-            # start_time window: first run after today's start_time if no last_run_at
             now = datetime.now(timezone.utc)
-            # start_time stored in UTC in DB
-            start_time = None
-            try:
-                conn2 = _get_db_conn()
-                row = conn2.execute(
-                    "SELECT start_time FROM rss_schedule WHERE id = 1"
-                ).fetchone()
-                conn2.close()
-                start_time = row[0] if row and row[0] else "00:00"
-            except Exception:
-                start_time = "00:00"
-            try:
-                hh, mm = start_time.split(":")
-                start_dt = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-            except Exception:
-                start_dt = now.replace(hour=9, minute=0, second=0, microsecond=0)
-            if now < start_dt:
+            prev_due, _next_due = _compute_schedule_times(
+                now, sched.get("start_time_utc") or "00:00", sched.get("interval_minutes") or 30
+            )
+            if prev_due is None:
                 due = False
             else:
                 if last_dt:
-                    due = now - last_dt >= timedelta(minutes=sched["interval_minutes"])
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    due = last_dt < prev_due
                 else:
                     due = True
             if not due:
@@ -1111,8 +1100,8 @@ def admin_get_schedule(credentials: HTTPBasicCredentials = Depends(security)):
     _require_admin(credentials)
     conn = _get_db_conn()
     try:
-        sched = _get_schedule(conn)
-        return {**sched, "next_run_at": _compute_next_run(sched)}
+        sched = _get_schedule(conn, display_kst=True)
+        return {**sched, "next_run_at": _compute_next_run(sched, sched.get("start_time_utc") or "00:00")}
     finally:
         conn.close()
 
@@ -1476,22 +1465,46 @@ def _systemd_allowed() -> bool:
 
 def _write_systemd_timer(schedule: Dict[str, Any]) -> None:
     interval_minutes = schedule.get("interval_minutes", 30)
-    # Use OnUnitActiveSec for interval; start_time is handled by internal scheduler only
+    start_time_utc = schedule.get("start_time_utc") or schedule.get("start_time") or "00:00"
     timer_path = os.environ.get(
         "SYSTEMD_TIMER_PATH",
         "/etc/systemd/system/thread-collector-rss.timer",
     )
-    content = (
-        "[Unit]\n"
-        "Description=Thread Collector RSS Sync Timer\n\n"
-        "[Timer]\n"
-        "OnBootSec=2min\n"
-        f"OnUnitActiveSec={interval_minutes}min\n"
-        "AccuracySec=1min\n"
-        "Persistent=true\n\n"
-        "[Install]\n"
-        "WantedBy=timers.target\n"
-    )
+    on_calendar = None
+    try:
+        hh, mm = start_time_utc.split(":")
+        hh_i = int(hh)
+        mm_i = int(mm)
+    except Exception:
+        hh_i, mm_i = 0, 0
+
+    if interval_minutes > 0 and 60 % interval_minutes == 0:
+        # Run from start_time hour to end of day, aligned by minute offset
+        on_calendar = f"*-*-* {hh_i:02d}..23:{mm_i:02d}/{interval_minutes}"
+        content = (
+            "[Unit]\n"
+            "Description=Thread Collector RSS Sync Timer\n\n"
+            "[Timer]\n"
+            f"OnCalendar={on_calendar}\n"
+            "AccuracySec=1min\n"
+            "Persistent=true\n\n"
+            "[Install]\n"
+            "WantedBy=timers.target\n"
+        )
+    else:
+        # Fallback: start at specific time, then repeat by interval
+        on_calendar = f"*-*-* {hh_i:02d}:{mm_i:02d}:00"
+        content = (
+            "[Unit]\n"
+            "Description=Thread Collector RSS Sync Timer\n\n"
+            "[Timer]\n"
+            f"OnCalendar={on_calendar}\n"
+            f"OnUnitActiveSec={interval_minutes}min\n"
+            "AccuracySec=1min\n"
+            "Persistent=true\n\n"
+            "[Install]\n"
+            "WantedBy=timers.target\n"
+        )
     with open(timer_path, "w", encoding="utf-8") as f:
         f.write(content)
 

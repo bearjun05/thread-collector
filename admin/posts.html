@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Thread Collector Admin - Posts</title>
+  <style>
+    :root {
+      --bg: #f5f1e8;
+      --ink: #1a1a1a;
+      --muted: #5a5a5a;
+      --accent: #204c3d;
+      --accent-2: #e7d9b9;
+      --danger: #a63c3c;
+      --panel: #fffdf7;
+      --border: #d9cfb8;
+      --font: "IBM Plex Sans", "Space Grotesk", "Segoe UI", sans-serif;
+    }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 600px at 10% -10%, #fff7e6 0%, transparent 60%),
+                  radial-gradient(900px 500px at 110% 10%, #f0f7f1 0%, transparent 60%),
+                  var(--bg);
+      color: var(--ink);
+      font-family: var(--font);
+    }
+    .layout { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+    .sidebar { padding: 20px; border-right: 1px solid var(--border); background: #fbf7ee; }
+    .sidebar h1 { font-size: 16px; margin: 0 0 16px; }
+    .nav a { display: block; padding: 8px 10px; margin-bottom: 6px; text-decoration: none; color: var(--ink); border-radius: 8px; }
+    .nav a.active { background: var(--accent); color: #fff; }
+    main { padding: 20px 28px 32px; }
+    header { margin-bottom: 12px; }
+    header h2 { margin: 0; font-size: 18px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px; box-shadow: 0 6px 20px rgba(0,0,0,0.04); margin-bottom: 16px; }
+    h3 { margin: 0 0 12px; font-size: 16px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    input, button, select {
+      font-family: var(--font);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      font-size: 14px;
+      background: #fff;
+    }
+    button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+    button.secondary { background: var(--accent-2); color: var(--ink); border-color: var(--accent-2); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .muted { color: var(--muted); }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #e8efe6; color: #215a43; }
+    .pill.reply { background: #f3e3e3; color: #8c2c2c; }
+    .post-text { max-width: 520px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>Thread Collector</h1>
+      <nav class="nav">
+        <a href="/admin">Dashboard</a>
+        <a class="active" href="/admin/posts">Posts</a>
+        <a href="/admin/tokens">Tokens</a>
+        <a href="/admin/settings">Settings</a>
+      </nav>
+    </aside>
+    <main>
+      <header>
+        <h2>Posts</h2>
+      </header>
+
+      <section class="card">
+        <h3>Filters</h3>
+        <div class="row" style="margin-bottom: 8px;">
+          <input id="filterUsername" placeholder="username (optional)" />
+          <select id="filterReplies">
+            <option value="all">All</option>
+            <option value="root">Root only</option>
+            <option value="reply">Replies only</option>
+          </select>
+          <input id="filterLimit" type="number" min="1" max="500" value="50" style="width: 90px;" />
+          <button class="secondary" onclick="loadPosts(true)">Search</button>
+        </div>
+        <div class="row muted">
+          <span id="resultCount">-</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Results</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Type</th>
+              <th>Created</th>
+              <th>URL</th>
+              <th>Text</th>
+            </tr>
+          </thead>
+          <tbody id="postsBody"></tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    async function api(path) {
+      const res = await fetch(path);
+      if (!res.ok) {
+        const text = await res.text();
+        alert("API error: " + text);
+        throw new Error(text);
+      }
+      return res;
+    }
+
+    function buildQuery() {
+      const username = document.getElementById('filterUsername').value.trim();
+      const replies = document.getElementById('filterReplies').value;
+      const limit = parseInt(document.getElementById('filterLimit').value, 10) || 50;
+      const params = new URLSearchParams();
+      params.set('limit', String(limit));
+      if (username) params.set('username', username);
+      if (replies !== 'all') params.set('type', replies);
+      return params.toString();
+    }
+
+    async function loadPosts(reset) {
+      const qs = buildQuery();
+      const res = await api(`/admin/api/posts?${qs}`);
+      const data = await res.json();
+      const tbody = document.getElementById('postsBody');
+      tbody.innerHTML = '';
+      data.posts.forEach(p => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>@${p.username}</td>
+          <td><span class="pill ${p.is_reply ? 'reply' : ''}">${p.is_reply ? 'reply' : 'root'}</span></td>
+          <td>${p.created_at || '-'}</td>
+          <td><a href="${p.url}" target="_blank">open</a></td>
+          <td class="post-text">${(p.text || '').slice(0, 300)}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+      document.getElementById('resultCount').textContent = `Total: ${data.total}`;
+    }
+
+    loadPosts(true);
+  </script>
+</body>
+</html>

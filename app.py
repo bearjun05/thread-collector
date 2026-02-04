@@ -981,6 +981,12 @@ def admin_settings_ui(credentials: HTTPBasicCredentials = Depends(security)):
     return FileResponse("admin/settings.html")
 
 
+@app.get("/admin/posts")
+def admin_posts_ui(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    return FileResponse("admin/posts.html")
+
+
 @app.get("/admin/api/accounts")
 def admin_list_accounts(credentials: HTTPBasicCredentials = Depends(security)):
     _require_admin(credentials)
@@ -1093,6 +1099,59 @@ def admin_logs(lines: int = 200, credentials: HTTPBasicCredentials = Depends(sec
     _require_admin(credentials)
     text = _tail_log(RSS_LOG_PATH, lines=lines)
     return PlainTextResponse(text)
+
+
+@app.get("/admin/api/posts")
+def admin_list_posts(
+    username: Optional[str] = None,
+    type: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    username_value = username.lstrip("@").strip() if username else None
+    type_value = (type or "all").lower()
+    where = []
+    params: List[Any] = []
+    if username_value:
+        where.append("s.username = ?")
+        params.append(username_value)
+    if type_value == "root":
+        where.append("p.is_reply = 0")
+    elif type_value == "reply":
+        where.append("p.is_reply = 1")
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    conn = _get_db_conn()
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM posts p JOIN feed_sources s ON s.id = p.source_id {where_sql}",
+            tuple(params),
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT p.post_id, p.url, p.text, p.created_at, p.is_reply, s.username "
+            "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
+            f"{where_sql} ORDER BY p.created_at DESC LIMIT ? OFFSET ?",
+            tuple(params + [limit, offset]),
+        ).fetchall()
+        return {
+            "total": total,
+            "posts": [
+                {
+                    "post_id": r[0],
+                    "url": r[1],
+                    "text": r[2],
+                    "created_at": r[3],
+                    "is_reply": bool(r[4]),
+                    "username": r[5],
+                }
+                for r in rows
+            ],
+        }
+    finally:
+        conn.close()
 
 
 @app.get("/admin/api/schedule")

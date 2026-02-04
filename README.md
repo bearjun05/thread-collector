@@ -60,10 +60,15 @@ uv run python app.py
   - Posts: `/admin/posts` (스크랩 결과 조회)
   - Tokens: `/admin/tokens`
   - Settings: `/admin/settings`
+  - DB: `/admin/db` (DB 테이블 조회/삭제)
 
 **Admin 로그**
 - 스크랩 로그는 KST 기준으로 기록됩니다.
 - 로그에 계정 성공/실패 수, 게시물 수, 소요 시간 등이 요약됩니다.
+
+**스크랩 윈도우**
+- 기본적으로 최근 24시간 이내 게시물만 스크랩합니다.
+- 변경이 필요하면 `RSS_SCRAPE_WINDOW_HOURS` 환경변수로 조정할 수 있습니다.
 
 ---
 

@@ -987,6 +987,12 @@ def admin_posts_ui(credentials: HTTPBasicCredentials = Depends(security)):
     return FileResponse("admin/posts.html")
 
 
+@app.get("/admin/db")
+def admin_db_ui(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    return FileResponse("admin/db.html")
+
+
 @app.get("/admin/api/accounts")
 def admin_list_accounts(credentials: HTTPBasicCredentials = Depends(security)):
     _require_admin(credentials)
@@ -1099,6 +1105,74 @@ def admin_logs(lines: int = 200, credentials: HTTPBasicCredentials = Depends(sec
     _require_admin(credentials)
     text = _tail_log(RSS_LOG_PATH, lines=lines)
     return PlainTextResponse(text)
+
+
+ALLOWED_DB_TABLES = {
+    "feed_sources",
+    "posts",
+    "tokens",
+    "rss_token_logs",
+    "rss_invalid_token_logs",
+    "rss_rate_limits",
+    "rss_token_counters",
+    "rss_feed_cache",
+    "rss_cache_policy",
+    "rss_schedule",
+}
+
+
+@app.get("/admin/api/db/tables")
+def admin_db_tables(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    return {"tables": sorted(ALLOWED_DB_TABLES)}
+
+
+@app.get("/admin/api/db/rows")
+def admin_db_rows(
+    table: str,
+    limit: int = 50,
+    offset: int = 0,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    if table not in ALLOWED_DB_TABLES:
+        raise HTTPException(status_code=400, detail="invalid table")
+    limit = max(1, min(500, limit))
+    offset = max(0, offset)
+    conn = _get_db_conn()
+    try:
+        cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        columns = [c[1] for c in cols]
+        total = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        rows = conn.execute(
+            f"SELECT * FROM {table} LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return {"columns": columns, "rows": rows, "total": total}
+    finally:
+        conn.close()
+
+
+class AdminDbDelete(BaseModel):
+    table: str
+
+
+@app.post("/admin/api/db/delete")
+def admin_db_delete(
+    payload: AdminDbDelete,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    table = payload.table
+    if table not in ALLOWED_DB_TABLES:
+        raise HTTPException(status_code=400, detail="invalid table")
+    conn = _get_db_conn()
+    try:
+        conn.execute(f"DELETE FROM {table}")
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
 
 
 @app.get("/admin/api/posts")

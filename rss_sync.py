@@ -19,6 +19,7 @@ LOG_PATH = os.environ.get("RSS_SYNC_LOG_PATH", os.path.join("db", "rss_sync.log"
 # Safety window to avoid missing posts around cutoff
 CUTOFF_SAFETY_MINUTES = int(os.environ.get("RSS_CUTOFF_SAFETY_MINUTES", "120"))
 RSS_CACHE_LIMITS = os.environ.get("RSS_CACHE_LIMITS", "50")
+SCRAPE_WINDOW_HOURS = int(os.environ.get("RSS_SCRAPE_WINDOW_HOURS", "24"))
 KST = timezone(timedelta(hours=9))
 
 
@@ -298,16 +299,16 @@ async def run_once(usernames: Optional[List[str]] = None) -> None:
 
         semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)
         tasks = []
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=SCRAPE_WINDOW_HOURS)
         for acc in accounts:
-            latest = get_latest_created_at(conn, acc["id"])
-            cutoff = None
-            if latest:
-                cutoff = latest - timedelta(minutes=CUTOFF_SAFETY_MINUTES)
             tasks.append(
                 scrape_one(semaphore, acc["username"], cutoff)
             )
 
-        _log(f"Start scrape: {len(accounts)} accounts, concurrency={SCRAPE_CONCURRENCY}")
+        _log(
+            f"Start scrape: {len(accounts)} accounts, concurrency={SCRAPE_CONCURRENCY}, "
+            f"window_hours={SCRAPE_WINDOW_HOURS}"
+        )
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Write sequentially to avoid SQLite write contention

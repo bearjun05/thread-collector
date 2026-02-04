@@ -1,5 +1,6 @@
 """Threads 스크래퍼 API 서버"""
 import asyncio
+import json
 import os
 import secrets
 import sqlite3
@@ -24,7 +25,14 @@ from scraper import (
     scrape_thread_with_replies,
     scrape_threads_profile_with_replies,
 )
-from rss_sync import ensure_schema as ensure_rss_schema, run_once as rss_run_once, LOG_PATH as RSS_LOG_PATH, DB_PATH as RSS_DB_PATH
+from rss_sync import (
+    ensure_schema as ensure_rss_schema,
+    run_once as rss_run_once,
+    LOG_PATH as RSS_LOG_PATH,
+    DB_PATH as RSS_DB_PATH,
+    refresh_rss_cache_for_account,
+    load_accounts,
+)
 
 # 한국 표준 시간대 (KST = UTC+9)
 KST = timezone(timedelta(hours=9))
@@ -271,6 +279,16 @@ def _xml_escape(text: str) -> str:
     )
 
 
+def _parse_media_json(raw: Optional[str]) -> List[Dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
 def parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
     """다양한 형식의 날짜 문자열을 datetime으로 파싱."""
     if not dt_str:
@@ -391,6 +409,7 @@ class PostResponse(BaseModel):
     text: str
     created_at: Optional[str]
     url: str
+    media: List[Dict[str, str]] = []
 
 
 class ScrapeResponse(BaseModel):
@@ -503,6 +522,11 @@ class AdminScheduleUpdate(BaseModel):
     start_time: Optional[str] = Field(None, description="HH:MM 24h (KST)")
 
 
+class AdminCacheRefreshRequest(BaseModel):
+    usernames: Optional[List[str]] = None
+    all_accounts: bool = False
+
+
 class AdminTokenCreate(BaseModel):
     scope: str = Field(..., description="username or 'global'")
     is_active: bool = True
@@ -562,6 +586,7 @@ class ReplyPost(BaseModel):
     created_at: Optional[str] = None
     url: str
     author: Optional[str] = None
+    media: List[Dict[str, str]] = []
     replies: List["ReplyPost"] = []
 
 # Pydantic v2 forward reference 해결
@@ -575,6 +600,7 @@ class ThreadWithRepliesResponse(BaseModel):
     created_at: Optional[str] = None
     url: str
     author: Optional[str] = None
+    media: List[Dict[str, str]] = []
     replies: List[ReplyPost] = []
     total_replies_count: int = 0
     scraped_at: str
@@ -672,6 +698,7 @@ def build_v2_data_from_result(
             "text": post.get("text", ""),
             "created_at": post.get("created_at"),
             "author": post.get("author"),
+            "media": post.get("media", []),
         }
     
     def normalize_simple_post(post: Dict[str, Any]) -> Dict[str, Any]:
@@ -681,6 +708,7 @@ def build_v2_data_from_result(
             "text": post.get("text", ""),
             "created_at": post.get("created_at"),
             "author": None,
+            "media": post.get("media", []),
         }
     
     def flatten_replies(replies: List[Dict[str, Any]], parent_id: Optional[str]) -> List[Dict[str, Any]]:
@@ -693,6 +721,7 @@ def build_v2_data_from_result(
                     "text": r.get("text", ""),
                     "created_at": r.get("created_at"),
                     "author": r.get("author"),
+                    "media": r.get("media", []),
                 },
                 "parent_id": parent_id,
             })
@@ -823,7 +852,7 @@ def rss_feed(
             raise HTTPException(status_code=404, detail="account not found")
         
         roots = conn.execute(
-            "SELECT post_id, url, text, created_at FROM posts "
+            "SELECT post_id, url, text, media_json, created_at FROM posts "
             "WHERE source_id = ? AND is_reply = 0 ORDER BY created_at DESC LIMIT ?",
             (src[0], limit),
         ).fetchall()
@@ -834,16 +863,26 @@ def rss_feed(
         
         items = []
         for r in roots:
-            post_id, url, text, created_at = r
+            post_id, url, text, media_json, created_at = r
+            root_media = _parse_media_json(media_json)
             replies = conn.execute(
-                "SELECT text FROM posts WHERE source_id = ? AND is_reply = 1 AND parent_post_id = ? "
+                "SELECT text, media_json FROM posts WHERE source_id = ? AND is_reply = 1 AND parent_post_id = ? "
                 "ORDER BY created_at ASC",
                 (src[0], post_id),
             ).fetchall()
-            if replies:
-                reply_texts = [rr[0] or "" for rr in replies if rr[0] is not None]
-                if reply_texts:
-                    text = (text or "") + "\n" + "\n".join(reply_texts)
+            parts = []
+            if (text or "").strip():
+                parts.append((text or "").strip())
+            if root_media:
+                parts.extend([m.get("url") for m in root_media if m.get("url")])
+            for rr in replies:
+                rep_text = (rr[0] or "").strip()
+                if rep_text:
+                    parts.append(rep_text)
+                rep_media = _parse_media_json(rr[1])
+                if rep_media:
+                    parts.extend([m.get("url") for m in rep_media if m.get("url")])
+            text = "\n\n".join([p for p in parts if p])
             created_dt = None
             try:
                 created_dt = date_parser.parse(created_at) if created_at else None
@@ -911,7 +950,7 @@ def rss_feed(
         last_modified = None
         if roots:
             try:
-                last_modified_dt = date_parser.parse(roots[0][3]) if roots[0][3] else None
+                last_modified_dt = date_parser.parse(roots[0][4]) if roots[0][4] else None
                 if last_modified_dt and last_modified_dt.tzinfo is None:
                     last_modified_dt = last_modified_dt.replace(tzinfo=timezone.utc)
                 if last_modified_dt:
@@ -1134,6 +1173,29 @@ def admin_logs(lines: int = 200, credentials: HTTPBasicCredentials = Depends(sec
     _require_admin(credentials)
     text = _tail_log(RSS_LOG_PATH, lines=lines)
     return PlainTextResponse(text)
+
+
+@app.post("/admin/api/rss-cache/refresh")
+def admin_refresh_rss_cache(
+    payload: AdminCacheRefreshRequest,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        accounts = load_accounts(conn, only_active=True)
+        if payload.all_accounts:
+            targets = accounts
+        else:
+            if not payload.usernames:
+                raise HTTPException(status_code=400, detail="usernames is required when all_accounts=false")
+            usernames_set = {u.lstrip("@") for u in payload.usernames}
+            targets = [a for a in accounts if a["username"] in usernames_set]
+        for acc in targets:
+            refresh_rss_cache_for_account(conn, acc["id"], acc["username"])
+        return {"status": "ok", "updated": len(targets)}
+    finally:
+        conn.close()
 
 
 ALLOWED_DB_TABLES = {
@@ -1758,6 +1820,7 @@ async def scrape_thread_get(
                     created_at=r.get("created_at"),
                     url=r.get("url", ""),
                     author=r.get("author"),
+                    media=r.get("media", []),
                     replies=convert_replies(r.get("replies", [])),
                 ))
             return result
@@ -1768,6 +1831,7 @@ async def scrape_thread_get(
             created_at=thread_data.get("created_at"),
             url=thread_data.get("url", ""),
             author=thread_data.get("author"),
+            media=thread_data.get("media", []),
             replies=convert_replies(thread_data.get("replies", [])),
             total_replies_count=thread_data.get("total_replies_count", 0),
             scraped_at=datetime.now(KST).isoformat(),
@@ -1810,6 +1874,7 @@ async def scrape_thread_post(request: ScrapeThreadRequest):
                     created_at=r.get("created_at"),
                     url=r.get("url", ""),
                     author=r.get("author"),
+                    media=r.get("media", []),
                     replies=convert_replies(r.get("replies", [])),
                 ))
             return result
@@ -1820,6 +1885,7 @@ async def scrape_thread_post(request: ScrapeThreadRequest):
             created_at=thread_data.get("created_at"),
             url=thread_data.get("url", ""),
             author=thread_data.get("author"),
+            media=thread_data.get("media", []),
             replies=convert_replies(thread_data.get("replies", [])),
             total_replies_count=thread_data.get("total_replies_count", 0),
             scraped_at=datetime.now(KST).isoformat(),
@@ -1883,6 +1949,7 @@ async def scrape_profile_with_replies(request: ScrapeWithRepliesRequest):
                     created_at=r.get("created_at"),
                     url=r.get("url", ""),
                     author=r.get("author"),
+                    media=r.get("media", []),
                     replies=convert_replies(r.get("replies", [])),
                 ))
             return result
@@ -1896,6 +1963,7 @@ async def scrape_profile_with_replies(request: ScrapeWithRepliesRequest):
                 created_at=post.get("created_at"),
                 url=post.get("url", ""),
                 author=post.get("author"),
+                media=post.get("media", []),
                 replies=convert_replies(post.get("replies", [])),
                 total_replies_count=post.get("total_replies_count", 0),
                 scraped_at=datetime.now(KST).isoformat(),
@@ -2007,14 +2075,15 @@ async def scrape_get(
             def convert_replies(replies: List[Dict]) -> List[ReplyPost]:
                 result = []
                 for r in replies:
-                    result.append(ReplyPost(
-                        post_id=r.get("post_id"),
-                        text=r.get("text", ""),
-                        created_at=r.get("created_at"),
-                        url=r.get("url", ""),
-                        author=r.get("author"),
-                        replies=convert_replies(r.get("replies", [])),
-                    ))
+                result.append(ReplyPost(
+                    post_id=r.get("post_id"),
+                    text=r.get("text", ""),
+                    created_at=r.get("created_at"),
+                    url=r.get("url", ""),
+                    author=r.get("author"),
+                    media=r.get("media", []),
+                    replies=convert_replies(r.get("replies", [])),
+                ))
                 return result
             
             thread_responses = []
@@ -2067,6 +2136,7 @@ async def scrape_get(
                         created_at=thread_data.get("created_at"),
                         url=thread_data.get("url", ""),
                         author=thread_data.get("author"),
+                        media=thread_data.get("media", []),
                         replies=convert_replies(thread_data.get("replies", [])),
                         total_replies_count=thread_data.get("total_replies_count", 0),
                         scraped_at=datetime.now(KST).isoformat(),
@@ -2083,6 +2153,7 @@ async def scrape_get(
                         created_at=post.get("created_at"),
                         url=post_url,
                         author=None,
+                        media=post.get("media", []),
                         replies=[],
                         total_replies_count=0,
                         scraped_at=datetime.now(KST).isoformat(),
@@ -2158,6 +2229,7 @@ async def scrape_get(
                         "text": post.get("text") or "",
                         "created_at": post.get("created_at"),
                         "url": post.get("url") or "",
+                        "media": post.get("media", []),
                     })
                 except Exception as post_error:
                     print(f"PostResponse 변환 실패: {post_error}")
@@ -2271,6 +2343,7 @@ async def scrape_post(request: ScrapeRequest):
                     "text": post.get("text") or "",
                     "created_at": post.get("created_at"),
                     "url": post.get("url") or "",
+                    "media": post.get("media", []),
                 }
                 post_responses.append(PostResponse(**post_data))
             except Exception as post_error:
@@ -2726,6 +2799,7 @@ async def scrape_single_account(
                     "text": post.get("text") or "",
                     "created_at": post.get("created_at"),
                     "url": post.get("url") or "",
+                    "media": post.get("media", []),
                 }
                 post_responses.append(PostResponse(**post_data))
             except Exception as post_error:

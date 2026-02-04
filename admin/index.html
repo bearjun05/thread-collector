@@ -144,6 +144,10 @@
           <button class="secondary" onclick="scrapeOne()">Run One</button>
         </div>
         <div class="row" style="margin-bottom: 10px;">
+          <button class="secondary" onclick="refreshCacheAll()">Refresh Cache</button>
+          <button class="secondary" onclick="refreshCacheOne()">Refresh One Cache</button>
+        </div>
+        <div class="row" style="margin-bottom: 10px;">
           <label>Interval (min):</label>
           <input id="scheduleInterval" type="number" min="5" max="1440" style="width: 90px;" />
           <label>Start (KST HH:MM):</label>
@@ -298,6 +302,26 @@
       const username = document.getElementById('scrapeUser').value.trim();
       if (!username) return alert('username required');
       await api('/admin/api/scrape', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usernames: [username] })
+      });
+      await loadLogs();
+    }
+
+    async function refreshCacheAll() {
+      await api('/admin/api/rss-cache/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ all_accounts: true })
+      });
+      await loadLogs();
+    }
+
+    async function refreshCacheOne() {
+      const username = document.getElementById('scrapeUser').value.trim();
+      if (!username) return alert('username required');
+      await api('/admin/api/rss-cache/refresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ usernames: [username] })

@@ -72,6 +72,14 @@ uv run python app.py
 
 **계정별 답글 수집**
 - Admin > Accounts에서 계정별로 답글 수집 ON/OFF 및 깊이(`max_reply_depth`)를 설정할 수 있습니다.
+- 답글은 루트 작성자의 연속 답글만 포함됩니다. (다른 작성자 등장 시 이후는 제외)
+
+**RSS 캐시 갱신**
+- Admin > Dashboard에서 `Refresh Cache` 버튼으로 스크랩 없이 캐시만 재생성할 수 있습니다.
+
+**미디어(이미지/영상)**
+- 스크랩 결과에 `media` 필드가 추가됩니다. (이미지/영상 URL 리스트)
+- RSS에서는 root/답글 텍스트 뒤에 미디어 URL이 줄바꿈으로 포함됩니다.
 
 ---
 

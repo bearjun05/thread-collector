@@ -430,7 +430,50 @@ async def _parse_single_post(node, seen_ids: set) -> Optional[Dict[str, Any]]:
                     is_reply = True
         except Exception:
             is_reply = False
-        
+
+        # 미디어(이미지/영상) 추출
+        media = []
+        try:
+            img_nodes = await node.query_selector_all("img")
+            for img in img_nodes:
+                src = await img.get_attribute("src") or await img.get_attribute("data-src")
+                if not src:
+                    continue
+                lower_src = src.lower()
+                if "profile" in lower_src or "avatar" in lower_src:
+                    continue
+                try:
+                    box = await img.bounding_box()
+                    if box and box["width"] < 80 and box["height"] < 80:
+                        continue
+                except Exception:
+                    pass
+                media.append({"type": "image", "url": src})
+
+            video_nodes = await node.query_selector_all("video")
+            for vid in video_nodes:
+                src = await vid.get_attribute("src")
+                if not src:
+                    source = await vid.query_selector("source")
+                    if source:
+                        src = await source.get_attribute("src")
+                if not src:
+                    continue
+                media.append({"type": "video", "url": src})
+        except Exception:
+            media = media or []
+
+        if media:
+            seen_media = set()
+            deduped = []
+            for item in media:
+                url = item.get("url")
+                if not url or url in seen_media:
+                    continue
+                seen_media.add(url)
+                deduped.append(item)
+            media = deduped
+
         seen_ids.add(post_id)
         
         return {
@@ -441,6 +484,7 @@ async def _parse_single_post(node, seen_ids: set) -> Optional[Dict[str, Any]]:
             "author": author,
             "replies": [],  # 답글은 나중에 채워짐
             "is_reply": is_reply,
+            "media": media,
         }
     except Exception as e:
         print(f"[scraper] 게시물 파싱 오류: {e}")
@@ -633,18 +677,24 @@ async def scrape_thread_with_replies(
             # =============================
             root_author_name = root_post.get("author")
             if root_author_name:
-                # 대소문자 무시 비교
+                # 대소문자 무시 비교 + 연속성 필터(다른 작성자 등장 시 이후는 모두 제외)
                 root_author_lower = root_author_name.lower()
-                same_author_replies = [
-                    reply for reply in candidate_posts 
-                    if reply.get("author") and reply.get("author").lower() == root_author_lower
-                ]
-                excluded_count = len(candidate_posts) - len(same_author_replies)
+                filtered = []
+                for reply in candidate_posts:
+                    author = reply.get("author")
+                    if not author or author.lower() != root_author_lower:
+                        break
+                    filtered.append(reply)
+                excluded_count = len(candidate_posts) - len(filtered)
                 if excluded_count > 0:
-                    print(f"[scraper] 작성자 필터링: {len(candidate_posts)}개 중 {len(same_author_replies)}개만 포함 (다른 작성자 {excluded_count}개 제외)")
-                candidate_posts = same_author_replies
+                    print(
+                        f"[scraper] 작성자+연속 필터링: {len(candidate_posts)}개 중 {len(filtered)}개만 포함 "
+                        f"(다른 작성자/비작성자 {excluded_count}개 제외)"
+                    )
+                candidate_posts = filtered
             else:
-                print(f"[scraper] 경고: 루트 게시물 작성자를 알 수 없어 필터링 불가")
+                print(f"[scraper] 경고: 루트 게시물 작성자를 알 수 없어 답글 제외")
+                candidate_posts = []
 
             # 답글을 root에 연결 (루트 작성자의 답글만 포함)
             root_post["replies"] = candidate_posts

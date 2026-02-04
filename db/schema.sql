@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS posts (
   post_id TEXT NOT NULL UNIQUE,
   url TEXT NOT NULL,
   text TEXT,
+  media_json TEXT,
   created_at TEXT,
   scraped_at TEXT NOT NULL,
   is_reply INTEGER NOT NULL DEFAULT 0,

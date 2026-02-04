@@ -1,6 +1,7 @@
 """Account-based scheduled scraper with concurrency=5 and SQLite persistence."""
 import asyncio
 import hashlib
+import json
 import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
@@ -56,6 +57,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE feed_sources ADD COLUMN include_replies INTEGER NOT NULL DEFAULT 1")
     if "max_reply_depth" not in cols:
         conn.execute("ALTER TABLE feed_sources ADD COLUMN max_reply_depth INTEGER NOT NULL DEFAULT 1")
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(posts)").fetchall()}
+    if "media_json" not in cols:
+        conn.execute("ALTER TABLE posts ADD COLUMN media_json TEXT")
 
     # Ensure rss_schedule row exists
     rows = conn.execute("SELECT id FROM rss_schedule WHERE id = 1").fetchall()
@@ -171,10 +176,21 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
         text = r.get("text") or ""
         created_at = r.get("created_at")
         replies = r.get("replies", [])
+        media = r.get("media", [])
+        parts = []
+        if text.strip():
+            parts.append(text.strip())
+        if media:
+            parts.extend([m.get("url") for m in media if m.get("url")])
         if replies:
-            reply_texts = [rep.get("text") or "" for rep in replies if rep.get("text") is not None]
-            if reply_texts:
-                text = text + "\n" + "\n".join(reply_texts)
+            for rep in replies:
+                rep_text = (rep.get("text") or "").strip()
+                if rep_text:
+                    parts.append(rep_text)
+                rep_media = rep.get("media", [])
+                if rep_media:
+                    parts.extend([m.get("url") for m in rep_media if m.get("url")])
+        text = "\n\n".join([p for p in parts if p])
         created_dt = _parse_dt(created_at) if created_at else None
         pub_date = format_datetime(created_dt) if created_dt else format_datetime(datetime.now(timezone.utc))
         title = (text or "").strip().split("\n")[0][:80] or "(no title)"
@@ -203,17 +219,29 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
     return xml, etag, last_modified
 
 
+def _parse_media_json(raw: Optional[str]) -> List[Dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception:
+        return []
+
+
 def _fetch_roots_with_replies(conn: sqlite3.Connection, source_id: int, limit: int) -> List[Dict[str, Any]]:
     roots = conn.execute(
-        "SELECT post_id, url, text, created_at FROM posts "
+        "SELECT post_id, url, text, media_json, created_at FROM posts "
         "WHERE source_id = ? AND is_reply = 0 ORDER BY created_at DESC LIMIT ?",
         (source_id, limit),
     ).fetchall()
     results = []
     for r in roots:
-        post_id, url, text, created_at = r
+        post_id, url, text, media_json, created_at = r
         replies = conn.execute(
-            "SELECT post_id, url, text, created_at FROM posts "
+            "SELECT post_id, url, text, media_json, created_at FROM posts "
             "WHERE source_id = ? AND is_reply = 1 AND parent_post_id = ? "
             "ORDER BY created_at ASC",
             (source_id, post_id),
@@ -223,9 +251,16 @@ def _fetch_roots_with_replies(conn: sqlite3.Connection, source_id: int, limit: i
                 "post_id": post_id,
                 "url": url,
                 "text": text,
+                "media": _parse_media_json(media_json),
                 "created_at": created_at,
                 "replies": [
-                    {"post_id": rr[0], "url": rr[1], "text": rr[2], "created_at": rr[3]}
+                    {
+                        "post_id": rr[0],
+                        "url": rr[1],
+                        "text": rr[2],
+                        "media": _parse_media_json(rr[3]),
+                        "created_at": rr[4],
+                    }
                     for rr in replies
                 ],
             }
@@ -302,6 +337,7 @@ def _flatten_posts(posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "created_at": p.get("created_at"),
                 "is_reply": False,
                 "parent_post_id": None,
+                "media": p.get("media", []),
             }
         )
         for rep in p.get("replies", []) or []:
@@ -314,6 +350,7 @@ def _flatten_posts(posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "created_at": rep.get("created_at"),
                     "is_reply": True,
                     "parent_post_id": root_id,
+                    "media": rep.get("media", []),
                 }
             )
     return flat
@@ -327,12 +364,19 @@ def insert_posts(
     now = datetime.now(timezone.utc).isoformat()
     payload = []
     for p in _flatten_posts(posts):
+        media_json = None
+        if p.get("media"):
+            try:
+                media_json = json.dumps(p.get("media", []), ensure_ascii=False)
+            except Exception:
+                media_json = None
         payload.append(
             (
                 source_id,
                 p.get("post_id"),
                 p.get("url"),
                 p.get("text"),
+                media_json,
                 p.get("created_at"),
                 now,
                 1 if p.get("is_reply") else 0,
@@ -344,8 +388,8 @@ def insert_posts(
     conn.executemany(
         """
         INSERT OR IGNORE INTO posts
-        (source_id, post_id, url, text, created_at, scraped_at, is_reply, parent_post_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (source_id, post_id, url, text, media_json, created_at, scraped_at, is_reply, parent_post_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         payload,
     )

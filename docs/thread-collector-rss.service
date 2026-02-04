@@ -1,0 +1,13 @@
+[Unit]
+Description=Thread Collector RSS Sync
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/Users/uj.choe/projects/my/thread-collector
+Environment=RSS_DB_PATH=/Users/uj.choe/projects/my/thread-collector/db/rss_cache.db
+Environment=RSS_SCHEMA_PATH=/Users/uj.choe/projects/my/thread-collector/db/schema.sql
+Environment=RSS_SCRAPE_CONCURRENCY=5
+Environment=RSS_CUTOFF_SAFETY_MINUTES=120
+Environment=RSS_SYNC_LOG_PATH=/Users/uj.choe/projects/my/thread-collector/db/rss_sync.log
+ExecStart=/opt/homebrew/bin/uv run python rss_sync.py

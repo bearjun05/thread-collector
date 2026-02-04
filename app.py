@@ -1,11 +1,20 @@
 """Threads 스크래퍼 API 서버"""
 import asyncio
+import os
+import secrets
+import sqlite3
 import traceback
+from email.utils import format_datetime
+import hashlib
+import subprocess
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Request
+from fastapi import BackgroundTasks
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from dateutil import parser as date_parser
 
@@ -15,6 +24,7 @@ from scraper import (
     scrape_thread_with_replies,
     scrape_threads_profile_with_replies,
 )
+from rss_sync import ensure_schema as ensure_rss_schema, run_once as rss_run_once, LOG_PATH as RSS_LOG_PATH, DB_PATH as RSS_DB_PATH
 
 # 한국 표준 시간대 (KST = UTC+9)
 KST = timezone(timedelta(hours=9))
@@ -25,6 +35,213 @@ app = FastAPI(
     description="Threads 프로필 게시물을 스크래핑하는 API 서버",
     version="0.1.0",
 )
+
+security = HTTPBasic()
+
+
+def _require_admin(credentials: HTTPBasicCredentials) -> None:
+    admin_user = os.environ.get("ADMIN_USER", "admin")
+    admin_password = os.environ.get("ADMIN_PASSWORD")
+    if not admin_password:
+        raise HTTPException(status_code=500, detail="ADMIN_PASSWORD is not set")
+    if credentials.username != admin_user or credentials.password != admin_password:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _get_db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(RSS_DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    ensure_rss_schema(conn)
+    return conn
+
+
+def _tail_log(path: str, lines: int = 200) -> str:
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            block = 4096
+            data = b""
+            while size > 0 and data.count(b"\n") <= lines:
+                read_size = block if size - block > 0 else size
+                f.seek(-read_size, os.SEEK_CUR)
+                data = f.read(read_size) + data
+                f.seek(-read_size, os.SEEK_CUR)
+                size -= read_size
+            text = data.decode("utf-8", errors="replace")
+            return "\n".join(text.splitlines()[-lines:])
+    except FileNotFoundError:
+        return ""
+
+
+def _get_schedule(conn: sqlite3.Connection) -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT is_active, interval_minutes, start_time, last_run_at, updated_at FROM rss_schedule WHERE id = 1"
+    ).fetchone()
+    if not row:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO rss_schedule (id, is_active, interval_minutes, start_time, last_run_at, updated_at) "
+            "VALUES (1, 1, 30, '09:00', NULL, ?)",
+            (now,),
+        )
+        conn.commit()
+        row = (1, 30, "09:00", None, now)
+    return {
+        "is_active": bool(row[0]),
+        "interval_minutes": row[1],
+        "start_time": row[2],
+        "last_run_at": row[3],
+        "updated_at": row[4],
+    }
+
+
+def _get_rate_limit(conn: sqlite3.Connection) -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT window_seconds, max_requests, updated_at FROM rss_rate_limits WHERE id = 1"
+    ).fetchone()
+    if not row:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO rss_rate_limits (id, window_seconds, max_requests, updated_at) "
+            "VALUES (1, 300, 60, ?)",
+            (now,),
+        )
+        conn.commit()
+        row = (300, 60, now)
+    return {
+        "window_seconds": row[0],
+        "max_requests": row[1],
+        "updated_at": row[2],
+    }
+
+
+def _log_token_request(
+    conn: sqlite3.Connection,
+    token_id: int,
+    username: str,
+    request: Request,
+    status_code: int,
+) -> None:
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        ip = request.client.host if request.client else None
+        ua = request.headers.get("user-agent")
+        conn.execute(
+            "INSERT INTO rss_token_logs (token_id, username, ip, user_agent, status_code, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (token_id, username, ip, ua, status_code, now),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _log_invalid_token(
+    conn: sqlite3.Connection,
+    token_value: str,
+    username: Optional[str],
+    request: Request,
+    status_code: int,
+) -> None:
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        token_hash = hashlib.sha256(token_value.encode("utf-8")).hexdigest()
+        ip = request.client.host if request.client else None
+        ua = request.headers.get("user-agent")
+        conn.execute(
+            "INSERT INTO rss_invalid_token_logs (token_hash, username, ip, user_agent, status_code, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (token_hash, username, ip, ua, status_code, now),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _compute_next_run(schedule: Dict[str, Any]) -> Optional[str]:
+    if not schedule.get("is_active"):
+        return None
+    now = datetime.now(timezone.utc)
+    start_time = schedule.get("start_time") or "09:00"
+    try:
+        hh, mm = start_time.split(":")
+        start_dt = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+    except Exception:
+        start_dt = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if now < start_dt:
+        return start_dt.isoformat()
+    last = schedule.get("last_run_at")
+    last_dt = None
+    if last:
+        try:
+            last_dt = date_parser.parse(last)
+        except Exception:
+            last_dt = None
+    interval = schedule.get("interval_minutes") or 30
+    if last_dt:
+        return (last_dt + timedelta(minutes=interval)).isoformat()
+    return now.isoformat()
+
+
+async def _scheduler_loop() -> None:
+    lock = asyncio.Lock()
+    while True:
+        await asyncio.sleep(30)
+        try:
+            conn = _get_db_conn()
+            sched = _get_schedule(conn)
+            conn.close()
+            if not sched["is_active"]:
+                continue
+            last = sched["last_run_at"]
+            last_dt = None
+            if last:
+                try:
+                    last_dt = date_parser.parse(last)
+                except Exception:
+                    last_dt = None
+            # start_time window: first run after today's start_time if no last_run_at
+            now = datetime.now(timezone.utc)
+            start_time = sched.get("start_time") or "09:00"
+            try:
+                hh, mm = start_time.split(":")
+                start_dt = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+            except Exception:
+                start_dt = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if now < start_dt:
+                due = False
+            else:
+                if last_dt:
+                    due = now - last_dt >= timedelta(minutes=sched["interval_minutes"])
+                else:
+                    due = True
+            if not due:
+                continue
+            if lock.locked():
+                continue
+            async with lock:
+                await rss_run_once(None)
+                conn = _get_db_conn()
+                now_iso = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "UPDATE rss_schedule SET last_run_at = ?, updated_at = ? WHERE id = 1",
+                    (now_iso, now_iso),
+                )
+                conn.commit()
+                conn.close()
+        except Exception:
+            continue
+
+
+def _xml_escape(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+    )
 
 
 def parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
@@ -203,6 +420,68 @@ class BatchScrapeRequestV2(BaseModel):
     }
 
 
+class V2BatchScrapeRequest(BaseModel):
+    """새로운 응답 형식용 배치 스크래핑 요청 모델"""
+    usernames: List[str] = Field(..., description="Threads 사용자명 리스트", min_length=1, max_length=50)
+    since_days: Optional[int] = Field(1, description="최근 N일 이내 게시물만 (기본: 1일)", ge=1, le=365)
+    since_date: Optional[str] = Field(None, description="특정 날짜 이후 게시물만 (since_days보다 우선)")
+    include_replies: bool = Field(True, description="답글 포함 여부 (기본: True)")
+    max_reply_depth: int = Field(1, description="답글 수집 시 최대 깊이 (기본: 1)", ge=1, le=10)
+    max_per_account: int = Field(10, description="계정별 최대 스크랩 갯수 (기본: 10)", ge=1, le=100)
+    max_total: int = Field(300, description="전체 최대 스크랩 갯수 (기본: 300)", ge=1, le=1000)
+    response_style: Literal["threaded", "flat"] = Field(
+        "threaded",
+        description="응답 스타일: threaded(스레드 구조) | flat(플랫 구조)"
+    )
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "usernames": ["zuck", "meta", "instagram"],
+                    "since_days": 7,
+                    "max_per_account": 10,
+                    "max_total": 300,
+                    "response_style": "threaded",
+                }
+            ]
+        }
+    }
+
+
+class AdminAccountCreate(BaseModel):
+    username: str = Field(..., description="Threads username")
+    display_name: Optional[str] = None
+    profile_url: Optional[str] = None
+
+
+class AdminAccountUpdate(BaseModel):
+    is_active: Optional[bool] = None
+    display_name: Optional[str] = None
+    profile_url: Optional[str] = None
+
+
+class AdminScrapeRequest(BaseModel):
+    usernames: Optional[List[str]] = None
+    all_accounts: bool = False
+
+
+class AdminScheduleUpdate(BaseModel):
+    is_active: Optional[bool] = None
+    interval_minutes: Optional[int] = Field(None, ge=5, le=1440)
+    start_time: Optional[str] = Field(None, description="HH:MM 24h")
+
+
+class AdminTokenCreate(BaseModel):
+    scope: str = Field(..., description="username or 'global'")
+    is_active: bool = True
+
+
+class AdminRateLimitUpdate(BaseModel):
+    window_seconds: Optional[int] = Field(None, ge=60, le=3600)
+    max_requests: Optional[int] = Field(None, ge=1, le=10000)
+
+
 class BatchScrapeItem(BaseModel):
     """배치 스크래핑 결과 항목"""
     username: str
@@ -316,6 +595,294 @@ class ScrapeWithRepliesResponse(BaseModel):
     filter_applied: Optional[str] = None
 
 
+class V2ScrapeRequest(BaseModel):
+    """새로운 응답 형식용 스크래핑 요청 모델"""
+    username: str = Field(..., description="Threads 사용자명 (예: 'zuck', '@' 없이 입력)")
+    since_days: Optional[int] = Field(1, description="최근 N일 이내 게시물만 (기본: 1일)", ge=1, le=365)
+    since_date: Optional[str] = Field(None, description="특정 날짜 이후 게시물만 (ISO 형식, since_days보다 우선)")
+    include_replies: bool = Field(True, description="답글 포함 여부 (기본: True)")
+    max_reply_depth: int = Field(1, description="답글 수집 시 최대 깊이 (기본: 루트 + 직접 reply)", ge=1, le=10)
+    max_total_posts: int = Field(100, description="전체 출력 최대 게시물 수 (모든 root + 모든 답글 합계, 기본: 100)", ge=1, le=1000)
+    response_style: Literal["threaded", "flat"] = Field(
+        "threaded",
+        description="응답 스타일: threaded(스레드 구조) | flat(플랫 구조)"
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "username": "zuck",
+                    "since_days": 7,
+                    "include_replies": True,
+                    "max_reply_depth": 2,
+                    "max_total_posts": 100,
+                    "response_style": "threaded",
+                }
+            ]
+        }
+    }
+
+
+def build_v2_data_from_result(
+    result: Dict[str, Any],
+    response_style: Literal["threaded", "flat"],
+    include_replies: bool,
+) -> Dict[str, Any]:
+    def normalize_post(post: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": post.get("post_id"),
+            "url": post.get("url"),
+            "text": post.get("text", ""),
+            "created_at": post.get("created_at"),
+            "author": post.get("author"),
+        }
+    
+    def normalize_simple_post(post: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": None,
+            "url": post.get("url"),
+            "text": post.get("text", ""),
+            "created_at": post.get("created_at"),
+            "author": None,
+        }
+    
+    def flatten_replies(replies: List[Dict[str, Any]], parent_id: Optional[str]) -> List[Dict[str, Any]]:
+        flat = []
+        for r in replies:
+            flat.append({
+                "post": {
+                    "id": r.get("post_id"),
+                    "url": r.get("url"),
+                    "text": r.get("text", ""),
+                    "created_at": r.get("created_at"),
+                    "author": r.get("author"),
+                },
+                "parent_id": parent_id,
+            })
+            child_replies = r.get("replies", [])
+            if child_replies:
+                flat.extend(flatten_replies(child_replies, r.get("post_id")))
+        return flat
+    
+    if include_replies:
+        threads = []
+        posts_flat = []
+        for post in result["posts"]:
+            root = normalize_post(post)
+            replies = post.get("replies", [])
+            
+            if response_style == "flat":
+                posts_flat.append({
+                    "type": "root",
+                    "thread_id": root["id"],
+                    "post": root,
+                    "parent_id": None,
+                })
+                for r in flatten_replies(replies, root["id"]):
+                    posts_flat.append({
+                        "type": "reply",
+                        "thread_id": root["id"],
+                        "post": r["post"],
+                        "parent_id": r["parent_id"],
+                    })
+            else:
+                threads.append({
+                    "thread_id": root["id"],
+                    "post": root,
+                    "replies": replies,
+                    "counts": {
+                        "replies": post.get("total_replies_count", 0),
+                        "total": 1 + post.get("total_replies_count", 0),
+                    },
+                })
+        
+        if response_style == "flat":
+            return {"style": "flat", "items": posts_flat}
+        return {"style": "threaded", "items": threads}
+    
+    # 답글 미포함
+    threads = []
+    posts_flat = []
+    for post in result["posts"]:
+        root = normalize_simple_post(post)
+        if response_style == "flat":
+            posts_flat.append({
+                "type": "root",
+                "thread_id": None,
+                "post": root,
+                "parent_id": None,
+            })
+        else:
+            threads.append({
+                "thread_id": None,
+                "post": root,
+                "replies": [],
+                "counts": {"replies": 0, "total": 1},
+            })
+    
+    if response_style == "flat":
+        return {"style": "flat", "items": posts_flat}
+    return {"style": "threaded", "items": threads}
+
+
+@app.on_event("startup")
+async def on_startup():
+    if os.environ.get("ENABLE_INTERNAL_SCHEDULER") == "1":
+        asyncio.create_task(_scheduler_loop())
+
+
+@app.get("/v2/rss")
+def rss_feed(
+    request: Request,
+    username: str = Query(..., description="Threads username"),
+    token: str = Query(..., description="Access token"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    username = username.lstrip("@").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+    conn = _get_db_conn()
+    try:
+        tok = conn.execute(
+            "SELECT id, token, scope, is_active FROM tokens WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if not tok or not tok[2]:
+            _log_invalid_token(conn, token, username, request, 401)
+            raise HTTPException(status_code=401, detail="invalid token")
+        token_id = tok[0]
+        scope = tok[2]
+        if scope not in ("global", "*", username):
+            _log_token_request(conn, token_id, username, request, 403)
+            raise HTTPException(status_code=403, detail="token scope mismatch")
+
+        # rate limit
+        rl = _get_rate_limit(conn)
+        window = int(datetime.now(timezone.utc).timestamp()) // rl["window_seconds"]
+        row = conn.execute(
+            "SELECT count FROM rss_token_counters WHERE token_id = ? AND window_start = ?",
+            (token_id, window),
+        ).fetchone()
+        if row and row[0] >= rl["max_requests"]:
+            _log_token_request(conn, token_id, username, request, 429)
+            raise HTTPException(status_code=429, detail="rate limit exceeded")
+        if row:
+            conn.execute(
+                "UPDATE rss_token_counters SET count = count + 1 WHERE token_id = ? AND window_start = ?",
+                (token_id, window),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO rss_token_counters (token_id, window_start, count) VALUES (?, ?, 1)",
+                (token_id, window),
+            )
+        conn.commit()
+        
+        src = conn.execute(
+            "SELECT id, username FROM feed_sources WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if not src:
+            raise HTTPException(status_code=404, detail="account not found")
+        
+        rows = conn.execute(
+            "SELECT post_id, url, text, created_at FROM posts "
+            "WHERE source_id = ? ORDER BY created_at DESC LIMIT ?",
+            (src[0], limit),
+        ).fetchall()
+        
+        channel_title = f"{username} Threads Feed"
+        channel_link = f"https://www.threads.com/@{username}"
+        channel_desc = f"Threads posts scraped for @{username}"
+        
+        items = []
+        for r in rows:
+            post_id, url, text, created_at = r
+            created_dt = None
+            try:
+                created_dt = date_parser.parse(created_at) if created_at else None
+            except Exception:
+                created_dt = None
+            if created_dt and created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            pub_date = format_datetime(created_dt) if created_dt else format_datetime(datetime.now(timezone.utc))
+            title = (text or "").strip().split("\n")[0][:80] or "(no title)"
+            desc = (text or "").strip()
+            items.append(
+                f"<item>"
+                f"<title>{_xml_escape(title)}</title>"
+                f"<link>{_xml_escape(url)}</link>"
+                f"<guid>{_xml_escape(post_id or url)}</guid>"
+                f"<pubDate>{pub_date}</pubDate>"
+                f"<description>{_xml_escape(desc)}</description>"
+                f"</item>"
+            )
+        
+        cache_row = conn.execute(
+            "SELECT etag, last_modified, xml FROM rss_feed_cache WHERE username = ? AND limit_count = ?",
+            (username, limit),
+        ).fetchone()
+        if cache_row:
+            cached_etag, cached_last, cached_xml = cache_row
+            inm = request.headers.get("if-none-match")
+            ims = request.headers.get("if-modified-since")
+            if inm and inm == cached_etag:
+                _log_token_request(conn, token_id, username, request, 304)
+                return PlainTextResponse("", status_code=304)
+            if ims and cached_last and ims == cached_last:
+                _log_token_request(conn, token_id, username, request, 304)
+                return PlainTextResponse("", status_code=304)
+
+        xml = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            "<rss version=\"2.0\">"
+            "<channel>"
+            f"<title>{_xml_escape(channel_title)}</title>"
+            f"<link>{_xml_escape(channel_link)}</link>"
+            f"<description>{_xml_escape(channel_desc)}</description>"
+            + "".join(items)
+            + "</channel></rss>"
+        )
+        etag = hashlib.sha256(xml.encode("utf-8")).hexdigest()
+        last_modified = None
+        if rows:
+            try:
+                last_modified_dt = date_parser.parse(rows[0][3]) if rows[0][3] else None
+                if last_modified_dt and last_modified_dt.tzinfo is None:
+                    last_modified_dt = last_modified_dt.replace(tzinfo=timezone.utc)
+                if last_modified_dt:
+                    last_modified = format_datetime(last_modified_dt)
+            except Exception:
+                last_modified = None
+        inm = request.headers.get("if-none-match")
+        ims = request.headers.get("if-modified-since")
+        if inm and inm == etag:
+            _log_token_request(conn, token_id, username, request, 304)
+            return PlainTextResponse("", status_code=304)
+        if ims and last_modified and ims == last_modified:
+            _log_token_request(conn, token_id, username, request, 304)
+            return PlainTextResponse("", status_code=304)
+
+        headers = {"ETag": etag}
+        if last_modified:
+            headers["Last-Modified"] = last_modified
+        _log_token_request(conn, token_id, username, request, 200)
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "INSERT OR REPLACE INTO rss_feed_cache (username, limit_count, etag, last_modified, xml, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (username, limit, etag, last_modified, xml, now),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        return PlainTextResponse(xml, media_type="application/rss+xml", headers=headers)
+    finally:
+        conn.close()
+
+
 @app.get("/")
 async def root():
     """API 루트 엔드포인트"""
@@ -325,6 +892,10 @@ async def root():
         "endpoints": {
             "GET /scrape": "⭐ 단일 계정 스크래핑 - 메타데이터 포함",
             "POST /batch-scrape": "⭐ 배치 스크래핑 - 여러 계정 동시 처리 (최대 5개 병렬)",
+            "POST /v2/scrape": "🧼 새 응답 형식 - 단일 계정 스크래핑",
+            "POST /v2/batch-scrape": "🧼 새 응답 형식 - 배치 스크래핑",
+            "GET /v2/rss": "🧾 계정별 RSS 피드 (token 필요)",
+            "GET /admin": "🔐 관리자 UI",
             "GET /search-users": "사용자 검색 (자동완성)",
             "GET /scrape-thread": "개별 게시물과 답글 수집",
             "GET /health": "서버 상태 확인",
@@ -336,9 +907,509 @@ async def root():
         "response_structure": {
             "single": "{ meta, stats, date_range, filter, posts }",
             "batch": "{ total_meta, results: [{ meta, stats, ... }, ...] }",
+            "v2": "{ meta, filter, stats, data }",
         },
     }
 
+
+@app.get("/admin")
+def admin_ui(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    return FileResponse("admin/index.html")
+
+
+@app.get("/admin/api/accounts")
+def admin_list_accounts(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, display_name, profile_url, is_active, created_at "
+            "FROM feed_sources ORDER BY id ASC"
+        ).fetchall()
+        data = [
+            {
+                "id": r[0],
+                "username": r[1],
+                "display_name": r[2],
+                "profile_url": r[3],
+                "is_active": bool(r[4]),
+                "created_at": r[5],
+            }
+            for r in rows
+        ]
+        return {"accounts": data}
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/accounts")
+def admin_add_account(payload: AdminAccountCreate, credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    username = payload.username.lstrip("@").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="username is required")
+    profile_url = payload.profile_url or f"https://www.threads.com/@{username}"
+    conn = _get_db_conn()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT OR IGNORE INTO feed_sources (username, display_name, profile_url, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (username, payload.display_name, profile_url, now),
+        )
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.patch("/admin/api/accounts/{account_id}")
+def admin_update_account(
+    account_id: int,
+    payload: AdminAccountUpdate,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    fields = []
+    values = []
+    if payload.is_active is not None:
+        fields.append("is_active = ?")
+        values.append(1 if payload.is_active else 0)
+    if payload.display_name is not None:
+        fields.append("display_name = ?")
+        values.append(payload.display_name)
+    if payload.profile_url is not None:
+        fields.append("profile_url = ?")
+        values.append(payload.profile_url)
+    if not fields:
+        return {"status": "no_change"}
+    values.append(account_id)
+    conn = _get_db_conn()
+    try:
+        conn.execute(
+            f"UPDATE feed_sources SET {', '.join(fields)} WHERE id = ?",
+            tuple(values),
+        )
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.delete("/admin/api/accounts/{account_id}")
+def admin_delete_account(account_id: int, credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        conn.execute("DELETE FROM feed_sources WHERE id = ?", (account_id,))
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/scrape")
+def admin_scrape(
+    payload: AdminScrapeRequest,
+    background_tasks: BackgroundTasks,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    if payload.all_accounts:
+        background_tasks.add_task(rss_run_once, None)
+    else:
+        if not payload.usernames:
+            raise HTTPException(status_code=400, detail="usernames is required when all_accounts=false")
+        background_tasks.add_task(rss_run_once, payload.usernames)
+    return {"status": "started"}
+
+
+@app.get("/admin/api/logs")
+def admin_logs(lines: int = 200, credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    text = _tail_log(RSS_LOG_PATH, lines=lines)
+    return PlainTextResponse(text)
+
+
+@app.get("/admin/api/schedule")
+def admin_get_schedule(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        sched = _get_schedule(conn)
+        return {**sched, "next_run_at": _compute_next_run(sched)}
+    finally:
+        conn.close()
+
+
+@app.patch("/admin/api/schedule")
+def admin_update_schedule(
+    payload: AdminScheduleUpdate,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        fields = []
+        values = []
+        if payload.is_active is not None:
+            fields.append("is_active = ?")
+            values.append(1 if payload.is_active else 0)
+        if payload.interval_minutes is not None:
+            fields.append("interval_minutes = ?")
+            values.append(payload.interval_minutes)
+        if payload.start_time is not None:
+            fields.append("start_time = ?")
+            values.append(payload.start_time)
+        if not fields:
+            return {"status": "no_change"}
+        now = datetime.now(timezone.utc).isoformat()
+        fields.append("updated_at = ?")
+        values.append(now)
+        values.append(1)
+        conn.execute(
+            f"UPDATE rss_schedule SET {', '.join(fields)} WHERE id = ?",
+            tuple(values),
+        )
+        conn.commit()
+        # Optional: update systemd timer if enabled
+        if _systemd_allowed():
+            try:
+                sched = _get_schedule(conn)
+                _write_systemd_timer(sched)
+                subprocess.run(["systemctl", "daemon-reload"], check=False)
+                subprocess.run(["systemctl", "restart", "thread-collector-rss.timer"], check=False)
+            except Exception:
+                pass
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/tokens")
+def admin_list_tokens(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, token, scope, is_active, created_at FROM tokens ORDER BY id DESC"
+        ).fetchall()
+        return {
+            "tokens": [
+                {
+                    "id": r[0],
+                    "token": r[1],
+                    "scope": r[2],
+                    "is_active": bool(r[3]),
+                    "created_at": r[4],
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/tokens")
+def admin_create_token(
+    payload: AdminTokenCreate,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    scope = payload.scope.strip()
+    if not scope:
+        raise HTTPException(status_code=400, detail="scope is required")
+    token = secrets.token_urlsafe(24)
+    conn = _get_db_conn()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO tokens (token, scope, created_at, is_active) VALUES (?, ?, ?, ?)",
+            (token, scope, now, 1 if payload.is_active else 0),
+        )
+        conn.commit()
+        return {"token": token}
+    finally:
+        conn.close()
+
+
+@app.patch("/admin/api/tokens/{token_id}")
+def admin_update_token(
+    token_id: int,
+    is_active: bool,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        conn.execute(
+            "UPDATE tokens SET is_active = ? WHERE id = ?",
+            (1 if is_active else 0, token_id),
+        )
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.delete("/admin/api/tokens/{token_id}")
+def admin_delete_token(token_id: int, credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        conn.execute("DELETE FROM tokens WHERE id = ?", (token_id,))
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/rate-limit")
+def admin_get_rate_limit(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        return _get_rate_limit(conn)
+    finally:
+        conn.close()
+
+
+@app.patch("/admin/api/rate-limit")
+def admin_update_rate_limit(
+    payload: AdminRateLimitUpdate,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        fields = []
+        values = []
+        if payload.window_seconds is not None:
+            fields.append("window_seconds = ?")
+            values.append(payload.window_seconds)
+        if payload.max_requests is not None:
+            fields.append("max_requests = ?")
+            values.append(payload.max_requests)
+        if not fields:
+            return {"status": "no_change"}
+        now = datetime.now(timezone.utc).isoformat()
+        fields.append("updated_at = ?")
+        values.append(now)
+        values.append(1)
+        conn.execute(
+            f"UPDATE rss_rate_limits SET {', '.join(fields)} WHERE id = ?",
+            tuple(values),
+        )
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/token-logs")
+def admin_token_logs(
+    limit: int = 200,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT l.id, l.token_id, t.scope, l.username, l.ip, l.user_agent, l.status_code, l.created_at "
+            "FROM rss_token_logs l "
+            "JOIN tokens t ON t.id = l.token_id "
+            "ORDER BY l.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return {
+            "logs": [
+                {
+                    "id": r[0],
+                    "token_id": r[1],
+                    "scope": r[2],
+                    "username": r[3],
+                    "ip": r[4],
+                    "user_agent": r[5],
+                    "status_code": r[6],
+                    "created_at": r[7],
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/token-stats")
+def admin_token_stats(
+    hours: int = 24,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    if hours < 1 or hours > 168:
+        raise HTTPException(status_code=400, detail="hours must be 1~168")
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    conn = _get_db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT t.id, t.scope, COUNT(*) as cnt "
+            "FROM rss_token_logs l "
+            "JOIN tokens t ON t.id = l.token_id "
+            "WHERE l.created_at >= ? "
+            "GROUP BY t.id, t.scope "
+            "ORDER BY cnt DESC",
+            (since.isoformat(),),
+        ).fetchall()
+        return {
+            "hours": hours,
+            "stats": [
+                {"token_id": r[0], "scope": r[1], "count": r[2]}
+                for r in rows
+            ],
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/invalid-token-logs")
+def admin_invalid_token_logs(
+    limit: int = 200,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, token_hash, username, ip, user_agent, status_code, created_at "
+            "FROM rss_invalid_token_logs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return {
+            "logs": [
+                {
+                    "id": r[0],
+                    "token_hash": r[1],
+                    "username": r[2],
+                    "ip": r[3],
+                    "user_agent": r[4],
+                    "status_code": r[5],
+                    "created_at": r[6],
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/rss-cache/clear")
+def admin_clear_rss_cache(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        conn.execute("DELETE FROM rss_feed_cache")
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/token-logs.csv")
+def admin_token_logs_csv(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        rows = conn.execute(
+            "SELECT l.id, l.token_id, t.scope, l.username, l.ip, l.user_agent, l.status_code, l.created_at "
+            "FROM rss_token_logs l "
+            "JOIN tokens t ON t.id = l.token_id "
+            "ORDER BY l.id DESC"
+        ).fetchall()
+        lines = [
+            "id,token_id,scope,username,ip,user_agent,status_code,created_at"
+        ]
+        for r in rows:
+            row = [
+                str(r[0]),
+                str(r[1]),
+                r[2] or "",
+                r[3] or "",
+                r[4] or "",
+                (r[5] or "").replace(\"\\n\", \" \").replace(\"\\r\", \" \"),
+                str(r[6]),
+                r[7] or \"\",
+            ]
+            lines.append(\",\".join([f\"\\\"{c}\\\"\" if \",\" in c else c for c in row]))
+        csv_text = \"\\n\".join(lines)
+        return PlainTextResponse(csv_text, media_type=\"text/csv\")
+    finally:
+        conn.close()
+
+
+def _systemd_allowed() -> bool:
+    return os.environ.get("ENABLE_SYSTEMD_CONTROL") == "1"
+
+def _write_systemd_timer(schedule: Dict[str, Any]) -> None:
+    interval_minutes = schedule.get("interval_minutes", 30)
+    # Use OnUnitActiveSec for interval; start_time is handled by internal scheduler only
+    timer_path = os.environ.get(
+        "SYSTEMD_TIMER_PATH",
+        "/etc/systemd/system/thread-collector-rss.timer",
+    )
+    content = (
+        "[Unit]\n"
+        "Description=Thread Collector RSS Sync Timer\n\n"
+        "[Timer]\n"
+        "OnBootSec=2min\n"
+        f"OnUnitActiveSec={interval_minutes}min\n"
+        "AccuracySec=1min\n"
+        "Persistent=true\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+    with open(timer_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+@app.get("/admin/api/systemd/status")
+def admin_systemd_status(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    if not _systemd_allowed():
+        raise HTTPException(status_code=403, detail="systemd control disabled")
+    res = subprocess.run(
+        ["systemctl", "status", "thread-collector-rss.timer", "--no-pager"],
+        capture_output=True,
+        text=True,
+    )
+    return PlainTextResponse(res.stdout + res.stderr)
+
+
+@app.post("/admin/api/systemd/start")
+def admin_systemd_start(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    if not _systemd_allowed():
+        raise HTTPException(status_code=403, detail="systemd control disabled")
+    subprocess.run(["systemctl", "start", "thread-collector-rss.timer"], check=False)
+    return {"status": "ok"}
+
+
+@app.post("/admin/api/systemd/stop")
+def admin_systemd_stop(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    if not _systemd_allowed():
+        raise HTTPException(status_code=403, detail="systemd control disabled")
+    subprocess.run(["systemctl", "stop", "thread-collector-rss.timer"], check=False)
+    return {"status": "ok"}
+
+
+@app.post("/admin/api/systemd/restart")
+def admin_systemd_restart(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    if not _systemd_allowed():
+        raise HTTPException(status_code=403, detail="systemd control disabled")
+    subprocess.run(["systemctl", "restart", "thread-collector-rss.timer"], check=False)
+    return {"status": "ok"}
 
 @app.get("/health")
 async def health():
@@ -916,6 +1987,76 @@ async def scrape_post(request: ScrapeRequest):
         raise HTTPException(status_code=500, detail=error_detail)
 
 
+@app.post("/v2/scrape")
+async def scrape_v2(request: V2ScrapeRequest):
+    """새로운 응답 형식의 스크래핑 엔드포인트 (POST 전용)
+    
+    스타일:
+    - threaded: 루트 스레드 단위로 replies 포함
+    - flat: 모든 게시물을 평탄화하여 반환
+    """
+    try:
+        username = request.username.lstrip("@")
+        if not username:
+            raise HTTPException(status_code=400, detail="사용자명이 필요합니다")
+        
+        # 기존 로직 재사용
+        result = await scrape_single_account_v2(
+            username=username,
+            max_posts=None,
+            max_scroll_rounds=200,
+            since_days=request.since_days,
+            since_date=request.since_date,
+            include_replies=request.include_replies,
+            max_reply_depth=request.max_reply_depth,
+            max_total_posts=request.max_total_posts,
+            semaphore=None,
+            shared_counter=None,
+        )
+        
+        response = {
+            "meta": {
+                "username": result["meta"]["username"],
+                "scraped_at": result["meta"]["scraped_at"],
+                "duration_seconds": result["meta"]["duration_seconds"],
+                "scroll_rounds": result["meta"]["scroll_rounds"],
+                "status": result["meta"]["status"],
+            },
+            "filter": {
+                "type": result["filter"]["type"],
+                "cutoff_date": result["filter"]["cutoff_date"],
+            },
+            "stats": {
+                "total_scraped": result["stats"]["total_scraped"],
+                "filtered_count": result["stats"]["filtered_count"],
+                "excluded_count": result["stats"]["excluded_count"],
+                "total_replies": result["stats"]["total_replies"],
+                "posts_with_replies": result["stats"]["posts_with_replies"],
+            },
+            "request": {
+                "since_days": request.since_days,
+                "since_date": request.since_date,
+                "include_replies": request.include_replies,
+                "max_reply_depth": request.max_reply_depth,
+                "max_total_posts": request.max_total_posts,
+                "response_style": request.response_style,
+            },
+            "data": build_v2_data_from_result(
+                result=result,
+                response_style=request.response_style,
+                include_replies=request.include_replies,
+            ),
+        }
+        
+        return JSONResponse(content=response)
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_detail = f"스크래핑 중 오류 발생: {str(e)}"
+        print(f"v2 스크래핑 오류 상세:")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=error_detail)
+
 class SharedCounter:
     """스레드 안전한 공유 카운터 (병렬 스크래핑에서 max_total 제어용)"""
     def __init__(self, max_total: int):
@@ -1119,6 +2260,9 @@ async def scrape_single_account_v2(
                 post_responses = []
                 total_replies_collected = 0
                 posts_with_replies_count = 0
+                if any("is_reply" in p for p in filtered_posts):
+                    filtered_posts = [p for p in filtered_posts if not p.get("is_reply")]
+                
                 for post in filtered_posts[:max_total_posts]:
                     # 공유 카운터 체크
                     if shared_counter and await shared_counter.is_full():
@@ -1473,6 +2617,124 @@ async def batch_scrape_v2(request: BatchScrapeRequestV2):
         print(f"배치 스크래핑 오류:")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"배치 스크래핑 중 오류 발생: {str(e)}")
+
+
+@app.post("/v2/batch-scrape")
+async def batch_scrape_v2_clean(request: V2BatchScrapeRequest):
+    """새로운 응답 형식의 배치 스크래핑 엔드포인트 (POST 전용)"""
+    import time
+    batch_start_time = time.time()
+    
+    try:
+        if not request.usernames:
+            raise HTTPException(status_code=400, detail="사용자명 리스트가 비어있습니다")
+        
+        unique_usernames = list(dict.fromkeys(request.usernames))
+        
+        shared_counter = SharedCounter(max_total=request.max_total)
+        semaphore = asyncio.Semaphore(5)
+        
+        tasks = [
+            scrape_single_account_v2(
+                username=username,
+                max_posts=request.max_per_account,
+                max_scroll_rounds=50,
+                since_days=request.since_days,
+                since_date=request.since_date,
+                include_replies=request.include_replies,
+                max_reply_depth=request.max_reply_depth,
+                max_total_posts=request.max_per_account,
+                semaphore=semaphore,
+                shared_counter=shared_counter,
+            )
+            for username in unique_usernames
+        ]
+        
+        results = await asyncio.gather(*tasks)
+        
+        batch_duration = round(time.time() - batch_start_time, 2)
+        success_count = sum(1 for r in results if r["meta"]["status"] == "success")
+        skipped_count = sum(1 for r in results if r["meta"]["status"] == "skipped")
+        failed_count = sum(1 for r in results if r["meta"]["status"] == "failed")
+        total_filtered = sum(r["stats"]["filtered_count"] for r in results)
+        total_replies = sum(r["stats"]["total_replies"] for r in results)
+        
+        skipped_usernames = [r["meta"]["username"] for r in results if r["meta"]["status"] == "skipped"]
+        
+        # 전체 날짜 범위 계산
+        all_dates = []
+        for r in results:
+            if r["date_range"]["newest"]:
+                all_dates.append(parse_datetime(r["date_range"]["newest"]))
+            if r["date_range"]["oldest"]:
+                all_dates.append(parse_datetime(r["date_range"]["oldest"]))
+        all_dates = [d for d in all_dates if d is not None]
+        
+        if all_dates:
+            overall_newest = max(all_dates).isoformat()
+            overall_oldest = min(all_dates).isoformat()
+            overall_days = (max(all_dates) - min(all_dates)).days
+        else:
+            overall_newest = overall_oldest = None
+            overall_days = 0
+        
+        cleaned_results = []
+        for r in results:
+            cleaned_results.append({
+                "meta": r["meta"],
+                "filter": r["filter"],
+                "stats": r["stats"],
+                "data": build_v2_data_from_result(
+                    result=r,
+                    response_style=request.response_style,
+                    include_replies=request.include_replies,
+                ),
+            })
+        
+        response = {
+            "batch_meta": {
+                "accounts_requested": len(unique_usernames),
+                "accounts_processed": len(results),
+                "accounts_skipped": skipped_count,
+                "skipped_usernames": skipped_usernames,
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "total_duration_seconds": batch_duration,
+                "total_collected": total_filtered,
+                "max_total_reached": shared_counter.count >= request.max_total,
+                "total_replies": total_replies,
+                "settings": {
+                    "max_per_account": request.max_per_account,
+                    "max_total": request.max_total,
+                    "since_days": request.since_days,
+                    "include_replies": request.include_replies,
+                    "concurrency": 5,
+                    "response_style": request.response_style,
+                },
+                "date_range": {
+                    "days": overall_days,
+                    "newest": overall_newest,
+                    "oldest": overall_oldest,
+                },
+                "completed_at": datetime.now(KST).isoformat(),
+            },
+            "request": {
+                "since_days": request.since_days,
+                "since_date": request.since_date,
+                "include_replies": request.include_replies,
+                "max_reply_depth": request.max_reply_depth,
+                "max_per_account": request.max_per_account,
+                "max_total": request.max_total,
+                "response_style": request.response_style,
+            },
+            "results": cleaned_results,
+        }
+        
+        return JSONResponse(content=response)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"v2 배치 스크래핑 중 오류 발생: {str(e)}")
 
 
 if __name__ == "__main__":

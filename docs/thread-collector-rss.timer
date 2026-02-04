@@ -1,0 +1,11 @@
+[Unit]
+Description=Thread Collector RSS Sync Timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

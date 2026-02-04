@@ -419,6 +419,18 @@ async def _parse_single_post(node, seen_ids: set) -> Optional[Dict[str, Any]]:
         else:
             text_content = await node.inner_text()
         
+        # 답글 여부 힌트 (프로필 피드에서 root/reply 구분용)
+        is_reply = False
+        try:
+            node_text = await node.inner_text()
+            lines = [l.strip() for l in node_text.split("\n") if l.strip()]
+            if lines:
+                first_line = lines[0]
+                if first_line.startswith("Replying to") or first_line.startswith("답글"):
+                    is_reply = True
+        except Exception:
+            is_reply = False
+        
         seen_ids.add(post_id)
         
         return {
@@ -428,6 +440,7 @@ async def _parse_single_post(node, seen_ids: set) -> Optional[Dict[str, Any]]:
             "url": full_url,
             "author": author,
             "replies": [],  # 답글은 나중에 채워짐
+            "is_reply": is_reply,
         }
     except Exception as e:
         print(f"[scraper] 게시물 파싱 오류: {e}")

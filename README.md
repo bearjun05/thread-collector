@@ -98,6 +98,47 @@ curl "http://localhost:8001/scrape?username=zuck&since_date=2024-12-01"
 
 ---
 
+### Admin: GET /admin/api/posts
+
+스크랩된 게시물을 관리 화면에서 조회하기 위한 API입니다.
+
+**예시:**
+```bash
+# 최신 50개
+curl "http://localhost:8001/admin/api/posts?limit=50"
+
+# 특정 계정 + root만
+curl "http://localhost:8001/admin/api/posts?username=choi.openai&type=root&limit=50"
+
+# 답글만 + 페이지네이션
+curl "http://localhost:8001/admin/api/posts?type=reply&limit=50&offset=50"
+```
+
+**파라미터:**
+| 파라미터 | 필수 | 설명 |
+|---------|-----|------|
+| `username` | ❌ | 특정 계정만 필터 (@ 없이) |
+| `type` | ❌ | `all` / `root` / `reply` |
+| `limit` | ❌ | 조회 개수 (1~500, 기본 50) |
+| `offset` | ❌ | 페이지네이션 시작 위치 (기본 0) |
+
+**응답 예시:**
+```json
+{
+  "total": 1240,
+  "posts": [
+    {
+      "post_id": "DUO6NzIEl2u",
+      "url": "https://www.threads.com/@choi.openai/post/DUO6NzIEl2u",
+      "text": "와.. 개미쳤습니다 진짜..",
+      "created_at": "2026-02-01T23:00:38.000Z",
+      "is_reply": false,
+      "username": "choi.openai"
+    }
+  ]
+}
+```
+
 ### 1-1. 새 응답 형식: POST /v2/scrape
 
 기존 로직은 그대로 두고 **응답 구조만 정리한 새 엔드포인트**입니다.

@@ -141,6 +141,7 @@
         <div class="row" style="margin-bottom: 10px;">
           <button onclick="scrapeAll()">Run All Now</button>
           <input id="scrapeUser" placeholder="username" />
+          <input id="scrapeMaxTotal" type="number" min="1" max="1000" placeholder="max total (optional)" style="width: 140px;" />
           <button class="secondary" onclick="scrapeOne()">Run One</button>
         </div>
         <div class="row" style="margin-bottom: 10px;">
@@ -290,21 +291,23 @@
     }
 
     async function scrapeAll() {
+      const max_total_posts = parseInt(document.getElementById('scrapeMaxTotal').value, 10) || null;
       await api('/admin/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ all_accounts: true })
+        body: JSON.stringify({ all_accounts: true, max_total_posts })
       });
       await loadLogs();
     }
 
     async function scrapeOne() {
       const username = document.getElementById('scrapeUser').value.trim();
+      const max_total_posts = parseInt(document.getElementById('scrapeMaxTotal').value, 10) || null;
       if (!username) return alert('username required');
       await api('/admin/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usernames: [username] })
+        body: JSON.stringify({ usernames: [username], max_total_posts })
       });
       await loadLogs();
     }

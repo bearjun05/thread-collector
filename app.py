@@ -531,6 +531,7 @@ class AdminAccountUpdate(BaseModel):
 class AdminScrapeRequest(BaseModel):
     usernames: Optional[List[str]] = None
     all_accounts: bool = False
+    max_total_posts: Optional[int] = Field(None, ge=1, le=1000)
 
 
 class AdminScheduleUpdate(BaseModel):
@@ -1186,11 +1187,11 @@ def admin_scrape(
 ):
     _require_admin(credentials)
     if payload.all_accounts:
-        background_tasks.add_task(rss_run_once, None)
+        background_tasks.add_task(rss_run_once, None, payload.max_total_posts)
     else:
         if not payload.usernames:
             raise HTTPException(status_code=400, detail="usernames is required when all_accounts=false")
-        background_tasks.add_task(rss_run_once, payload.usernames)
+        background_tasks.add_task(rss_run_once, payload.usernames, payload.max_total_posts)
     return {"status": "started"}
 
 

@@ -435,6 +435,7 @@ async def scrape_one(
     cutoff_utc: Optional[datetime],
     include_replies: bool,
     max_reply_depth: int,
+    max_total_posts: Optional[int],
 ) -> List[Dict[str, Any]]:
     async with semaphore:
         result = await scrape_threads_profile_with_replies(
@@ -443,13 +444,13 @@ async def scrape_one(
             max_scroll_rounds=50,
             include_replies=include_replies,
             max_reply_depth=max_reply_depth,
-            max_total_posts=300,
+            max_total_posts=max_total_posts or 300,
             cutoff_utc=cutoff_utc,
         )
         return result or []
 
 
-async def run_once(usernames: Optional[List[str]] = None) -> None:
+async def run_once(usernames: Optional[List[str]] = None, max_total_posts: Optional[int] = None) -> None:
     started_at = datetime.now(timezone.utc)
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -476,12 +477,14 @@ async def run_once(usernames: Optional[List[str]] = None) -> None:
                     cutoff,
                     acc.get("include_replies", True),
                     acc.get("max_reply_depth", 1),
+                    max_total_posts,
                 )
             )
 
+        extra = f", max_total_posts={max_total_posts}" if max_total_posts else ""
         _log(
             f"Start scrape: {len(accounts)} accounts, concurrency={SCRAPE_CONCURRENCY}, "
-            f"window_hours={SCRAPE_WINDOW_HOURS}"
+            f"window_hours={SCRAPE_WINDOW_HOURS}{extra}"
         )
         results = await asyncio.gather(*tasks, return_exceptions=True)
 

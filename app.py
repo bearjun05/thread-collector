@@ -87,10 +87,18 @@ def _get_schedule(conn: sqlite3.Connection) -> Dict[str, Any]:
         )
         conn.commit()
         row = (1, 30, "09:00", None, now)
+    start_time_utc = row[2]
+    # Convert UTC HH:MM -> KST HH:MM for admin display
+    try:
+        hh, mm = start_time_utc.split(":")
+        kst_dt = datetime(2000, 1, 1, int(hh), int(mm), tzinfo=timezone.utc).astimezone(KST)
+        start_time_kst = f\"{kst_dt.hour:02d}:{kst_dt.minute:02d}\"
+    except Exception:
+        start_time_kst = \"09:00\"
     return {
         "is_active": bool(row[0]),
         "interval_minutes": row[1],
-        "start_time": row[2],
+        "start_time": start_time_kst,
         "last_run_at": row[3],
         "updated_at": row[4],
     }
@@ -203,7 +211,17 @@ async def _scheduler_loop() -> None:
                     last_dt = None
             # start_time window: first run after today's start_time if no last_run_at
             now = datetime.now(timezone.utc)
-            start_time = sched.get("start_time") or "09:00"
+            # start_time stored in UTC in DB
+            start_time = None
+            try:
+                conn2 = _get_db_conn()
+                row = conn2.execute(
+                    "SELECT start_time FROM rss_schedule WHERE id = 1"
+                ).fetchone()
+                conn2.close()
+                start_time = row[0] if row and row[0] else "00:00"
+            except Exception:
+                start_time = "00:00"
             try:
                 hh, mm = start_time.split(":")
                 start_dt = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
@@ -469,7 +487,7 @@ class AdminScrapeRequest(BaseModel):
 class AdminScheduleUpdate(BaseModel):
     is_active: Optional[bool] = None
     interval_minutes: Optional[int] = Field(None, ge=5, le=1440)
-    start_time: Optional[str] = Field(None, description="HH:MM 24h")
+    start_time: Optional[str] = Field(None, description="HH:MM 24h (KST)")
 
 
 class AdminTokenCreate(BaseModel):
@@ -1060,8 +1078,16 @@ def admin_update_schedule(
             fields.append("interval_minutes = ?")
             values.append(payload.interval_minutes)
         if payload.start_time is not None:
+            # Convert KST HH:MM -> UTC HH:MM for storage
+            try:
+                hh, mm = payload.start_time.split(":")
+                kst_dt = datetime(2000, 1, 1, int(hh), int(mm), tzinfo=KST)
+                utc_dt = kst_dt.astimezone(timezone.utc)
+                utc_hhmm = f"{utc_dt.hour:02d}:{utc_dt.minute:02d}"
+            except Exception:
+                utc_hhmm = "00:00"
             fields.append("start_time = ?")
-            values.append(payload.start_time)
+            values.append(utc_hhmm)
         if not fields:
             return {"status": "no_change"}
         now = datetime.now(timezone.utc).isoformat()
@@ -1336,7 +1362,7 @@ def admin_token_logs_csv(credentials: HTTPBasicCredentials = Depends(security)):
                 r[2] or "",
                 r[3] or "",
                 r[4] or "",
-                (r[5] or "").replace(\"\\n\", \" \").replace(\"\\r\", \" \"),
+                (r[5] or "").replace("\n", " ").replace("\r", " "),
                 str(r[6]),
                 r[7] or \"\",
             ]

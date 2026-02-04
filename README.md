@@ -80,6 +80,7 @@ uv run python app.py
 **미디어(이미지/영상)**
 - 스크랩 결과에 `media` 필드가 추가됩니다. (이미지/영상 URL 리스트)
 - RSS에서는 root/답글 텍스트 뒤에 미디어 URL이 줄바꿈으로 포함됩니다.
+- RSS item에 `<enclosure>`가 추가되어 리더에서 미디어를 인식할 수 있습니다.
 
 ---
 
@@ -147,6 +148,9 @@ curl "http://localhost:8001/admin/api/posts?type=reply&limit=50&offset=50"
       "post_id": "DUO6NzIEl2u",
       "url": "https://www.threads.com/@choi.openai/post/DUO6NzIEl2u",
       "text": "와.. 개미쳤습니다 진짜..",
+      "media": [
+        { "type": "image", "url": "https://..." }
+      ],
       "created_at": "2026-02-01T23:00:38.000Z",
       "is_reply": false,
       "username": "choi.openai"

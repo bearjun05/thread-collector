@@ -289,6 +289,23 @@ def _parse_media_json(raw: Optional[str]) -> List[Dict[str, Any]]:
         return []
 
 
+def _guess_mime(url: str) -> str:
+    lower = url.lower()
+    if ".jpg" in lower or ".jpeg" in lower:
+        return "image/jpeg"
+    if ".png" in lower:
+        return "image/png"
+    if ".webp" in lower:
+        return "image/webp"
+    if ".gif" in lower:
+        return "image/gif"
+    if ".mp4" in lower:
+        return "video/mp4"
+    if ".webm" in lower:
+        return "video/webm"
+    return "application/octet-stream"
+
+
 def parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
     """다양한 형식의 날짜 문자열을 datetime으로 파싱."""
     if not dt_str:
@@ -873,15 +890,19 @@ def rss_feed(
             parts = []
             if (text or "").strip():
                 parts.append((text or "").strip())
+            media_urls = []
             if root_media:
-                parts.extend([m.get("url") for m in root_media if m.get("url")])
+                media_urls.extend([m.get("url") for m in root_media if m.get("url")])
             for rr in replies:
                 rep_text = (rr[0] or "").strip()
                 if rep_text:
                     parts.append(rep_text)
                 rep_media = _parse_media_json(rr[1])
                 if rep_media:
-                    parts.extend([m.get("url") for m in rep_media if m.get("url")])
+                    media_urls.extend([m.get("url") for m in rep_media if m.get("url")])
+            # dedupe media
+            seen_media = set()
+            media_urls = [u for u in media_urls if u and not (u in seen_media or seen_media.add(u))]
             text = "\n\n".join([p for p in parts if p])
             created_dt = None
             try:
@@ -893,6 +914,10 @@ def rss_feed(
             pub_date = format_datetime(created_dt) if created_dt else format_datetime(datetime.now(timezone.utc))
             title = (text or "").strip().split("\n")[0][:80] or "(no title)"
             desc = (text or "").strip()
+            enclosures = "".join(
+                f"<enclosure url=\"{_xml_escape(mu)}\" length=\"0\" type=\"{_xml_escape(_guess_mime(mu))}\" />"
+                for mu in media_urls
+            )
             items.append(
                 f"<item>"
                 f"<title>{_xml_escape(title)}</title>"
@@ -900,6 +925,7 @@ def rss_feed(
                 f"<guid>{_xml_escape(post_id or url)}</guid>"
                 f"<pubDate>{pub_date}</pubDate>"
                 f"<description>{_xml_escape(desc)}</description>"
+                f"{enclosures}"
                 f"</item>"
             )
         
@@ -1296,7 +1322,7 @@ def admin_list_posts(
             tuple(params),
         ).fetchone()[0]
         rows = conn.execute(
-            "SELECT p.post_id, p.url, p.text, p.created_at, p.is_reply, s.username "
+            "SELECT p.post_id, p.url, p.text, p.media_json, p.created_at, p.is_reply, s.username "
             "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
             f"{where_sql} ORDER BY p.created_at DESC LIMIT ? OFFSET ?",
             tuple(params + [limit, offset]),
@@ -1308,9 +1334,10 @@ def admin_list_posts(
                     "post_id": r[0],
                     "url": r[1],
                     "text": r[2],
-                    "created_at": r[3],
-                    "is_reply": bool(r[4]),
-                    "username": r[5],
+                    "media": _parse_media_json(r[3]),
+                    "created_at": r[4],
+                    "is_reply": bool(r[5]),
+                    "username": r[6],
                 }
                 for r in rows
             ],

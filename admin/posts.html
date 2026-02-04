@@ -98,6 +98,8 @@
               <th>Type</th>
               <th>Created</th>
               <th>URL</th>
+              <th>Images</th>
+              <th>Videos</th>
               <th>Text</th>
             </tr>
           </thead>
@@ -158,11 +160,18 @@
       tbody.innerHTML = '';
       data.posts.forEach(p => {
         const tr = document.createElement('tr');
+        const media = Array.isArray(p.media) ? p.media : [];
+        const images = media.filter(m => m.type === 'image');
+        const videos = media.filter(m => m.type === 'video');
+        const imagesPayload = encodeURIComponent(JSON.stringify(images));
+        const videosPayload = encodeURIComponent(JSON.stringify(videos));
         tr.innerHTML = `
           <td>@${p.username}</td>
           <td><span class="pill ${p.is_reply ? 'reply' : ''}">${p.is_reply ? 'reply' : 'root'}</span></td>
           <td>${p.created_at || '-'}</td>
           <td><a href="${p.url}" target="_blank">open</a></td>
+          <td>${images.length} ${images.length ? `<a href="#" data-media="${imagesPayload}" onclick="showMedia(event, this.dataset.media)">view</a>` : ''}</td>
+          <td>${videos.length} ${videos.length ? `<a href="#" data-media="${videosPayload}" onclick="showMedia(event, this.dataset.media)">view</a>` : ''}</td>
           <td class="post-text">${(p.text || '').slice(0, 300)}${(p.text || '').length > 300 ? '... ' : ''}<a href="#" data-text="${encodeURIComponent(p.text || '')}" onclick="showModal(event, this.dataset.text)">more</a></td>
         `;
         tbody.appendChild(tr);
@@ -200,8 +209,30 @@
       modal.style.display = 'flex';
     }
 
+    function showMedia(event, payload) {
+      event.preventDefault();
+      const modal = document.getElementById('mediaModal');
+      const content = document.getElementById('mediaContent');
+      let list = [];
+      try {
+        list = JSON.parse(decodeURIComponent(payload || '[]'));
+      } catch (e) {
+        list = [];
+      }
+      if (!list.length) {
+        content.textContent = '(no media)';
+      } else {
+        content.textContent = list.map(m => `${m.type}: ${m.url}`).join('\\n');
+      }
+      modal.style.display = 'flex';
+    }
+
     function closeModal() {
       document.getElementById('modal').style.display = 'none';
+    }
+
+    function closeMediaModal() {
+      document.getElementById('mediaModal').style.display = 'none';
     }
 
     setType('all');
@@ -215,6 +246,16 @@
         <button class="secondary" onclick="closeModal()">Close</button>
       </div>
       <div id="modalContent" class="post-text"></div>
+    </div>
+  </div>
+
+  <div id="mediaModal" onclick="closeMediaModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); align-items:center; justify-content:center; padding:20px;">
+    <div onclick="event.stopPropagation()" style="background:#fff; border-radius:14px; max-width:720px; width:100%; padding:18px; border:1px solid var(--border); max-height:70vh; overflow:auto;">
+      <div class="row" style="justify-content:space-between; margin-bottom:8px;">
+        <strong>Media</strong>
+        <button class="secondary" onclick="closeMediaModal()">Close</button>
+      </div>
+      <pre id="mediaContent"></pre>
     </div>
   </div>
 </body>

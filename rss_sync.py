@@ -191,10 +191,25 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
                 if rep_media:
                     parts.extend([m.get("url") for m in rep_media if m.get("url")])
         text = "\n\n".join([p for p in parts if p])
+        media_urls = []
+        if media:
+            media_urls.extend([m.get("url") for m in media if m.get("url")])
+        if replies:
+            for rep in replies:
+                rep_media = rep.get("media", [])
+                if rep_media:
+                    media_urls.extend([m.get("url") for m in rep_media if m.get("url")])
+        # dedupe
+        seen_media = set()
+        media_urls = [u for u in media_urls if u and not (u in seen_media or seen_media.add(u))]
         created_dt = _parse_dt(created_at) if created_at else None
         pub_date = format_datetime(created_dt) if created_dt else format_datetime(datetime.now(timezone.utc))
         title = (text or "").strip().split("\n")[0][:80] or "(no title)"
         desc = (text or "").strip()
+        enclosures = "".join(
+            f"<enclosure url=\"{_xml_escape(mu)}\" length=\"0\" type=\"{_xml_escape(_guess_mime(mu))}\" />"
+            for mu in media_urls
+        )
         items.append(
             f"<item>"
             f"<title>{_xml_escape(title)}</title>"
@@ -202,6 +217,7 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
             f"<guid>{_xml_escape(post_id or url)}</guid>"
             f"<pubDate>{pub_date}</pubDate>"
             f"<description>{_xml_escape(desc)}</description>"
+            f"{enclosures}"
             f"</item>"
         )
 
@@ -217,6 +233,23 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
     )
     etag = hashlib.sha256(xml.encode("utf-8")).hexdigest()
     return xml, etag, last_modified
+
+
+def _guess_mime(url: str) -> str:
+    lower = url.lower()
+    if ".jpg" in lower or ".jpeg" in lower:
+        return "image/jpeg"
+    if ".png" in lower:
+        return "image/png"
+    if ".webp" in lower:
+        return "image/webp"
+    if ".gif" in lower:
+        return "image/gif"
+    if ".mp4" in lower:
+        return "video/mp4"
+    if ".webm" in lower:
+        return "video/webm"
+    return "application/octet-stream"
 
 
 def _parse_media_json(raw: Optional[str]) -> List[Dict[str, Any]]:

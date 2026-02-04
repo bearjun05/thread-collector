@@ -295,7 +295,11 @@
 
     async function systemdStatus() {
       try {
-        const res = await api('/admin/api/systemd/status');
+        const res = await fetch('/admin/api/systemd/status');
+        if (!res.ok) {
+          document.getElementById('systemdBox').textContent = 'systemd control disabled';
+          return;
+        }
         const text = await res.text();
         document.getElementById('systemdBox').textContent = text || '(no status)';
       } catch (e) {

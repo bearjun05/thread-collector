@@ -19,10 +19,11 @@ LOG_PATH = os.environ.get("RSS_SYNC_LOG_PATH", os.path.join("db", "rss_sync.log"
 # Safety window to avoid missing posts around cutoff
 CUTOFF_SAFETY_MINUTES = int(os.environ.get("RSS_CUTOFF_SAFETY_MINUTES", "120"))
 RSS_CACHE_LIMITS = os.environ.get("RSS_CACHE_LIMITS", "50")
+KST = timezone(timedelta(hours=9))
 
 
 def _log(msg: str) -> None:
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(KST).isoformat()
     line = f"[{ts}] {msg}\n"
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
@@ -280,6 +281,7 @@ async def scrape_one(
 
 
 async def run_once(usernames: Optional[List[str]] = None) -> None:
+    started_at = datetime.now(timezone.utc)
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("PRAGMA foreign_keys = ON")
@@ -306,11 +308,22 @@ async def run_once(usernames: Optional[List[str]] = None) -> None:
             )
 
         _log(f"Start scrape: {len(accounts)} accounts, concurrency={SCRAPE_CONCURRENCY}")
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Write sequentially to avoid SQLite write contention
         total_inserted = 0
-        for acc, posts in zip(accounts, results):
+        total_posts = 0
+        success_accounts = 0
+        failed_accounts = 0
+        failures = []
+        for acc, res in zip(accounts, results):
+            if isinstance(res, Exception):
+                failed_accounts += 1
+                failures.append(f"@{acc['username']}: {type(res).__name__}")
+                continue
+            posts = res or []
+            total_posts += len(posts)
+            success_accounts += 1
             with conn:
                 total_inserted += insert_posts(conn, acc["id"], posts)
             # refresh cache after each account scrape
@@ -318,8 +331,15 @@ async def run_once(usernames: Optional[List[str]] = None) -> None:
                 refresh_rss_cache_for_account(conn, acc["id"], acc["username"])
             except Exception:
                 pass
-        print(f"[rss_sync] Done. Inserted/ignored changes: {total_inserted}")
-        _log(f"Done. Inserted/ignored changes: {total_inserted}")
+        duration = int((datetime.now(timezone.utc) - started_at).total_seconds())
+        summary = (
+            f"Done. accounts_total={len(accounts)} success={success_accounts} failed={failed_accounts} "
+            f"posts_scraped={total_posts} inserted_or_ignored={total_inserted} duration_sec={duration}"
+        )
+        if failures:
+            summary += f" failures=[{'; '.join(failures)}]"
+        print(f"[rss_sync] {summary}")
+        _log(summary)
     finally:
         conn.close()
 

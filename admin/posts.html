@@ -75,11 +75,11 @@
         <h3>Filters</h3>
         <div class="row" style="margin-bottom: 8px;">
           <input id="filterUsername" placeholder="username (optional)" />
-          <select id="filterReplies">
-            <option value="all">All</option>
-            <option value="root">Root only</option>
-            <option value="reply">Replies only</option>
-          </select>
+          <div class="row" style="gap: 6px;">
+            <button class="secondary" id="btnAll" onclick="setType('all')">All</button>
+            <button class="secondary" id="btnRoot" onclick="setType('root')">Root</button>
+            <button class="secondary" id="btnReply" onclick="setType('reply')">Reply</button>
+          </div>
           <input id="filterLimit" type="number" min="1" max="500" value="50" style="width: 90px;" />
           <button class="secondary" onclick="loadPosts(true)">Search</button>
         </div>
@@ -102,11 +102,20 @@
           </thead>
           <tbody id="postsBody"></tbody>
         </table>
+        <div class="row" style="margin-top: 12px;">
+          <button class="secondary" onclick="prevPage()">Prev</button>
+          <span class="muted" id="pageInfo">-</span>
+          <button class="secondary" onclick="nextPage()">Next</button>
+        </div>
       </section>
     </main>
   </div>
 
   <script>
+    let currentType = 'all';
+    let currentOffset = 0;
+    let currentTotal = 0;
+
     async function api(path) {
       const res = await fetch(path);
       if (!res.ok) {
@@ -119,19 +128,31 @@
 
     function buildQuery() {
       const username = document.getElementById('filterUsername').value.trim();
-      const replies = document.getElementById('filterReplies').value;
       const limit = parseInt(document.getElementById('filterLimit').value, 10) || 50;
       const params = new URLSearchParams();
       params.set('limit', String(limit));
+      params.set('offset', String(currentOffset));
       if (username) params.set('username', username);
-      if (replies !== 'all') params.set('type', replies);
+      if (currentType !== 'all') params.set('type', currentType);
       return params.toString();
     }
 
+    function setType(type) {
+      currentType = type;
+      document.getElementById('btnAll').style.background = type === 'all' ? 'var(--accent)' : 'var(--accent-2)';
+      document.getElementById('btnAll').style.color = type === 'all' ? '#fff' : 'var(--ink)';
+      document.getElementById('btnRoot').style.background = type === 'root' ? 'var(--accent)' : 'var(--accent-2)';
+      document.getElementById('btnRoot').style.color = type === 'root' ? '#fff' : 'var(--ink)';
+      document.getElementById('btnReply').style.background = type === 'reply' ? 'var(--accent)' : 'var(--accent-2)';
+      document.getElementById('btnReply').style.color = type === 'reply' ? '#fff' : 'var(--ink)';
+    }
+
     async function loadPosts(reset) {
+      if (reset) currentOffset = 0;
       const qs = buildQuery();
       const res = await api(`/admin/api/posts?${qs}`);
       const data = await res.json();
+      currentTotal = data.total || 0;
       const tbody = document.getElementById('postsBody');
       tbody.innerHTML = '';
       data.posts.forEach(p => {
@@ -141,14 +162,59 @@
           <td><span class="pill ${p.is_reply ? 'reply' : ''}">${p.is_reply ? 'reply' : 'root'}</span></td>
           <td>${p.created_at || '-'}</td>
           <td><a href="${p.url}" target="_blank">open</a></td>
-          <td class="post-text">${(p.text || '').slice(0, 300)}</td>
+          <td class="post-text">${(p.text || '').slice(0, 300)}${(p.text || '').length > 300 ? '... ' : ''}<a href="#" data-text="${encodeURIComponent(p.text || '')}" onclick="showModal(event, this.dataset.text)">more</a></td>
         `;
         tbody.appendChild(tr);
       });
       document.getElementById('resultCount').textContent = `Total: ${data.total}`;
+      updatePageInfo();
     }
 
+    function updatePageInfo() {
+      const limit = parseInt(document.getElementById('filterLimit').value, 10) || 50;
+      const start = currentTotal === 0 ? 0 : currentOffset + 1;
+      const end = Math.min(currentOffset + limit, currentTotal);
+      document.getElementById('pageInfo').textContent = `${start}-${end} / ${currentTotal}`;
+    }
+
+    function nextPage() {
+      const limit = parseInt(document.getElementById('filterLimit').value, 10) || 50;
+      if (currentOffset + limit >= currentTotal) return;
+      currentOffset += limit;
+      loadPosts(false);
+    }
+
+    function prevPage() {
+      const limit = parseInt(document.getElementById('filterLimit').value, 10) || 50;
+      currentOffset = Math.max(0, currentOffset - limit);
+      loadPosts(false);
+    }
+
+    function showModal(event, text) {
+      event.preventDefault();
+      const modal = document.getElementById('modal');
+      const content = document.getElementById('modalContent');
+      const decoded = text ? decodeURIComponent(text) : '';
+      content.textContent = decoded;
+      modal.style.display = 'flex';
+    }
+
+    function closeModal() {
+      document.getElementById('modal').style.display = 'none';
+    }
+
+    setType('all');
     loadPosts(true);
   </script>
+
+  <div id="modal" onclick="closeModal()" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); align-items:center; justify-content:center; padding:20px;">
+    <div onclick="event.stopPropagation()" style="background:#fff; border-radius:14px; max-width:720px; width:100%; padding:18px; border:1px solid var(--border); max-height:70vh; overflow:auto;">
+      <div class="row" style="justify-content:space-between; margin-bottom:8px;">
+        <strong>Full Text</strong>
+        <button class="secondary" onclick="closeModal()">Close</button>
+      </div>
+      <div id="modalContent" class="post-text"></div>
+    </div>
+  </div>
 </body>
 </html>

@@ -1116,10 +1116,12 @@ def admin_update_schedule(
     try:
         fields = []
         values = []
+        interval_minutes = None
         if payload.is_active is not None:
             fields.append("is_active = ?")
             values.append(1 if payload.is_active else 0)
         if payload.interval_minutes is not None:
+            interval_minutes = payload.interval_minutes
             fields.append("interval_minutes = ?")
             values.append(payload.interval_minutes)
         if payload.start_time is not None:
@@ -1144,6 +1146,15 @@ def admin_update_schedule(
             tuple(values),
         )
         conn.commit()
+        if interval_minutes is not None:
+            try:
+                conn.execute(
+                    "UPDATE rss_cache_policy SET ttl_seconds = ?, updated_at = ? WHERE id = 1",
+                    (interval_minutes * 60, now),
+                )
+                conn.commit()
+            except Exception:
+                pass
         # Optional: update systemd timer if enabled
         if _systemd_allowed():
             try:

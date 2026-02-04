@@ -1,11 +1,13 @@
 """Account-based scheduled scraper with concurrency=5 and SQLite persistence."""
 import asyncio
+import hashlib
 import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 from dateutil import parser as date_parser
+from email.utils import format_datetime
 
 from scraper import scrape_threads_profile
 
@@ -16,6 +18,7 @@ SCRAPE_CONCURRENCY = int(os.environ.get("RSS_SCRAPE_CONCURRENCY", "5"))
 LOG_PATH = os.environ.get("RSS_SYNC_LOG_PATH", os.path.join("db", "rss_sync.log"))
 # Safety window to avoid missing posts around cutoff
 CUTOFF_SAFETY_MINUTES = int(os.environ.get("RSS_CUTOFF_SAFETY_MINUTES", "120"))
+RSS_CACHE_LIMITS = os.environ.get("RSS_CACHE_LIMITS", "50")
 
 
 def _log(msg: str) -> None:
@@ -95,6 +98,117 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
         )
+
+
+def _xml_escape(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+    )
+
+
+def _get_cache_policy(conn: sqlite3.Connection) -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT enabled, ttl_seconds, updated_at FROM rss_cache_policy WHERE id = 1"
+    ).fetchone()
+    if not row:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO rss_cache_policy (id, enabled, ttl_seconds, updated_at) "
+            "VALUES (1, 1, 300, ?)",
+            (now,),
+        )
+        conn.commit()
+        row = (1, 300, now)
+    return {
+        "enabled": bool(row[0]),
+        "ttl_seconds": row[1],
+        "updated_at": row[2],
+    }
+
+
+def _parse_cache_limits() -> List[int]:
+    limits = []
+    for part in RSS_CACHE_LIMITS.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            val = int(part)
+        except ValueError:
+            continue
+        if 1 <= val <= 500:
+            limits.append(val)
+    return sorted(set(limits)) or [50]
+
+
+def _build_rss_xml(username: str, rows: List[tuple]) -> tuple[str, str, Optional[str]]:
+    channel_title = f"{username} Threads Feed"
+    channel_link = f"https://www.threads.com/@{username}"
+    channel_desc = f"Threads posts scraped for @{username}"
+
+    items = []
+    last_modified = None
+    if rows:
+        try:
+            dt = _parse_dt(rows[0][3])
+            if dt:
+                last_modified = format_datetime(dt)
+        except Exception:
+            last_modified = None
+
+    for r in rows:
+        post_id, url, text, created_at = r
+        created_dt = _parse_dt(created_at) if created_at else None
+        pub_date = format_datetime(created_dt) if created_dt else format_datetime(datetime.now(timezone.utc))
+        title = (text or "").strip().split("\n")[0][:80] or "(no title)"
+        desc = (text or "").strip()
+        items.append(
+            f"<item>"
+            f"<title>{_xml_escape(title)}</title>"
+            f"<link>{_xml_escape(url)}</link>"
+            f"<guid>{_xml_escape(post_id or url)}</guid>"
+            f"<pubDate>{pub_date}</pubDate>"
+            f"<description>{_xml_escape(desc)}</description>"
+            f"</item>"
+        )
+
+    xml = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        "<rss version=\"2.0\">"
+        "<channel>"
+        f"<title>{_xml_escape(channel_title)}</title>"
+        f"<link>{_xml_escape(channel_link)}</link>"
+        f"<description>{_xml_escape(channel_desc)}</description>"
+        + "".join(items)
+        + "</channel></rss>"
+    )
+    etag = hashlib.sha256(xml.encode("utf-8")).hexdigest()
+    return xml, etag, last_modified
+
+
+def refresh_rss_cache_for_account(conn: sqlite3.Connection, source_id: int, username: str) -> None:
+    policy = _get_cache_policy(conn)
+    if not policy["enabled"]:
+        return
+    limits = _parse_cache_limits()
+    for limit in limits:
+        rows = conn.execute(
+            "SELECT post_id, url, text, created_at FROM posts "
+            "WHERE source_id = ? ORDER BY created_at DESC LIMIT ?",
+            (source_id, limit),
+        ).fetchall()
+        xml, etag, last_modified = _build_rss_xml(username, rows)
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT OR REPLACE INTO rss_feed_cache (username, limit_count, etag, last_modified, xml, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (username, limit, etag, last_modified, xml, now),
+        )
+    conn.commit()
 
 
 def load_accounts(conn: sqlite3.Connection, only_active: bool = True) -> List[Dict[str, Any]]:
@@ -199,6 +313,11 @@ async def run_once(usernames: Optional[List[str]] = None) -> None:
         for acc, posts in zip(accounts, results):
             with conn:
                 total_inserted += insert_posts(conn, acc["id"], posts)
+            # refresh cache after each account scrape
+            try:
+                refresh_rss_cache_for_account(conn, acc["id"], acc["username"])
+            except Exception:
+                pass
         print(f"[rss_sync] Done. Inserted/ignored changes: {total_inserted}")
         _log(f"Done. Inserted/ignored changes: {total_inserted}")
     finally:

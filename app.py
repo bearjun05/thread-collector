@@ -82,6 +82,16 @@ def _tail_log(path: str, lines: int = 200) -> str:
         return ""
 
 
+def _append_log(message: str) -> None:
+    ts = datetime.now(KST).isoformat()
+    line = f"[{ts}] {message}\n"
+    try:
+        with open(RSS_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 def _get_schedule(conn: sqlite3.Connection, display_kst: bool = True) -> Dict[str, Any]:
     row = conn.execute(
         "SELECT is_active, interval_minutes, start_time, last_run_at, updated_at FROM rss_schedule WHERE id = 1"
@@ -1288,13 +1298,10 @@ def admin_refresh_rss_cache(
             refresh_rss_cache_for_account(conn, acc["id"], acc["username"])
         conn.commit()
         duration = int((datetime.now(timezone.utc) - start_ts).total_seconds())
-        try:
-            _log(
-                f"Cache refresh: accounts={len(targets)} duration_sec={duration} "
-                f"targets={[a['username'] for a in targets]}"
-            )
-        except Exception:
-            pass
+        _append_log(
+            f"Cache refresh: accounts={len(targets)} duration_sec={duration} "
+            f"targets={[a['username'] for a in targets]}"
+        )
         return {"status": "ok", "updated": len(targets)}
     finally:
         conn.close()

@@ -327,6 +327,34 @@ def _build_content_html(root_text: str, replies: List[tuple], media_urls: List[s
     return "".join(parts)
 
 
+def _build_html_preview(title: str, link: str, items: List[Dict[str, Any]]) -> str:
+    cards = []
+    for it in items:
+        cards.append(
+            f"<article class=\"item\">"
+            f"<h2><a href=\"{_xml_escape(it['link'])}\">{_xml_escape(it['title'])}</a></h2>"
+            f"<div class=\"meta\">{_xml_escape(it['pubDate'])}</div>"
+            f"<div class=\"content\">{it['content_html']}</div>"
+            f"</article>"
+        )
+    return (
+        "<!doctype html>"
+        "<html><head><meta charset=\"utf-8\" />"
+        f"<title>{_xml_escape(title)}</title>"
+        "<style>"
+        "body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f7f4ee;color:#1a1a1a;padding:24px;}"
+        ".item{background:#fff;border:1px solid #e5dcc8;border-radius:12px;padding:16px;margin-bottom:16px;}"
+        ".item h2{margin:0 0 8px;font-size:18px;}"
+        ".meta{color:#666;font-size:12px;margin-bottom:12px;}"
+        ".content img{max-width:100%;border-radius:10px;margin:8px 0;}"
+        ".content video{max-width:100%;margin:8px 0;}"
+        "</style></head><body>"
+        f"<h1><a href=\"{_xml_escape(link)}\">{_xml_escape(title)}</a></h1>"
+        + "".join(cards)
+        + "</body></html>"
+    )
+
+
 def _parse_media_json(raw: Optional[str]) -> List[Dict[str, Any]]:
     if not raw:
         return []
@@ -928,6 +956,7 @@ def rss_feed(
         channel_desc = f"Threads posts scraped for @{username}"
         
         items = []
+        preview_items = []
         for r in roots:
             post_id, url, text, media_json, created_at = r
             root_media = _parse_media_json(media_json)
@@ -984,7 +1013,20 @@ def rss_feed(
                 f"{media_contents}"
                 f"</item>"
             )
+            preview_items.append(
+                {
+                    "title": title,
+                    "link": url,
+                    "pubDate": pub_date,
+                    "content_html": content_html,
+                }
+            )
         
+        accept_header = request.headers.get("accept", "")
+        if "text/html" in accept_header.lower():
+            html = _build_html_preview(channel_title, channel_link, preview_items)
+            return Response(content=html, media_type="text/html; charset=utf-8")
+
         cache_policy = _get_cache_policy(conn)
         cache_row = None
         if cache_policy["enabled"]:

@@ -1269,6 +1269,7 @@ def admin_refresh_rss_cache(
     _require_admin(credentials)
     conn = _get_db_conn()
     try:
+        start_ts = datetime.now(timezone.utc)
         accounts = load_accounts(conn, only_active=True)
         if payload.all_accounts:
             targets = accounts
@@ -1282,6 +1283,14 @@ def admin_refresh_rss_cache(
             conn.execute("DELETE FROM rss_feed_cache WHERE username = ?", (acc["username"],))
             refresh_rss_cache_for_account(conn, acc["id"], acc["username"])
         conn.commit()
+        duration = int((datetime.now(timezone.utc) - start_ts).total_seconds())
+        try:
+            _log(
+                f"Cache refresh: accounts={len(targets)} duration_sec={duration} "
+                f"targets={[a['username'] for a in targets]}"
+            )
+        except Exception:
+            pass
         return {"status": "ok", "updated": len(targets)}
     finally:
         conn.close()

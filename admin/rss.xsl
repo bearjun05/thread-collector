@@ -21,21 +21,21 @@
       </head>
       <body>
         <h1>
-          <xsl:value-of select="/*[local-name()='rss']/*[local-name()='channel']/*[local-name()='title']" />
+          <xsl:value-of select="//*[local-name()='channel']/*[local-name()='title']" />
         </h1>
         <xsl:choose>
-          <xsl:when test="count(/*[local-name()='rss']/*[local-name()='channel']/*[local-name()='item']) &gt; 0">
-            <xsl:for-each select="/*[local-name()='rss']/*[local-name()='channel']/*[local-name()='item']">
+          <xsl:when test="count(//*[local-name()='item']) &gt; 0">
+            <xsl:for-each select="//*[local-name()='item']">
           <div class="item">
-            <div class="title"><a href="{link}"><xsl:value-of select="title" /></a></div>
-            <div class="meta"><xsl:value-of select="pubDate" /></div>
+            <div class="title"><a href="{*[local-name()='link']}"><xsl:value-of select="*[local-name()='title']" /></a></div>
+            <div class="meta"><xsl:value-of select="*[local-name()='pubDate']" /></div>
             <div class="content">
               <xsl:choose>
                 <xsl:when test="content:encoded">
                   <xsl:value-of select="content:encoded" disable-output-escaping="yes" />
                 </xsl:when>
                 <xsl:otherwise>
-                  <xsl:value-of select="description" disable-output-escaping="yes" />
+                  <xsl:value-of select="*[local-name()='description']" disable-output-escaping="yes" />
                 </xsl:otherwise>
               </xsl:choose>
             </div>

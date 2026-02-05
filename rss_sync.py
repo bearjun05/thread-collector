@@ -135,6 +135,28 @@ def _build_description_html(root_text: str, replies: List[Dict[str, Any]]) -> st
             parts.append(_format_text_html(rep_text))
     return "<br/><br/>".join(parts)
 
+def _media_html(media_urls: List[str]) -> str:
+    chunks = []
+    for url in media_urls:
+        lower = url.lower()
+        if any(ext in lower for ext in [".mp4", ".webm"]):
+            chunks.append(f"<video controls src=\"{_xml_escape(url)}\"></video>")
+        else:
+            chunks.append(f"<img src=\"{_xml_escape(url)}\" />")
+    return "<br/>".join(chunks)
+
+def _build_content_html(root_text: str, replies: List[Dict[str, Any]], media_urls: List[str]) -> str:
+    parts = []
+    if (root_text or "").strip():
+        parts.append(f"<p>{_xml_escape(root_text.strip())}</p>")
+    for rep in replies or []:
+        rep_text = (rep.get("text") or "").strip()
+        if rep_text:
+            parts.append(f"<p>{_xml_escape(rep_text)}</p>")
+    if media_urls:
+        parts.append(_media_html(media_urls))
+    return "".join(parts)
+
 
 def _get_cache_policy(conn: sqlite3.Connection) -> Dict[str, Any]:
     row = conn.execute(
@@ -219,6 +241,11 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
             f"<enclosure url=\"{_xml_escape(mu)}\" length=\"0\" type=\"{_xml_escape(_guess_mime(mu))}\" />"
             for mu in media_urls
         )
+        media_contents = "".join(
+            f"<media:content url=\"{_xml_escape(mu)}\" type=\"{_xml_escape(_guess_mime(mu))}\" />"
+            for mu in media_urls
+        )
+        content_html = _build_content_html(root_text, replies, media_urls)
         items.append(
             f"<item>"
             f"<title>{_xml_escape(title)}</title>"
@@ -226,13 +253,16 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
             f"<guid>{_xml_escape(post_id or url)}</guid>"
             f"<pubDate>{pub_date}</pubDate>"
             f"<description>{desc_html}</description>"
+            f"<content:encoded><![CDATA[{content_html}]]></content:encoded>"
             f"{enclosures}"
+            f"{media_contents}"
             f"</item>"
         )
 
     xml = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-        "<rss version=\"2.0\">"
+        "<?xml-stylesheet type=\"text/xsl\" href=\"/rss.xsl\"?>"
+        "<rss version=\"2.0\" xmlns:content=\"http://purl.org/rss/1.0/modules/content/\" xmlns:media=\"http://search.yahoo.com/mrss/\">"
         "<channel>"
         f"<title>{_xml_escape(channel_title)}</title>"
         f"<link>{_xml_escape(channel_link)}</link>"

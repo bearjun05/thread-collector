@@ -20,8 +20,12 @@
         </style>
       </head>
       <body>
-        <h1>Thread Collector RSS</h1>
-        <xsl:for-each select="rss/channel/item">
+        <h1>
+          <xsl:value-of select="/*[local-name()='rss']/*[local-name()='channel']/*[local-name()='title']" />
+        </h1>
+        <xsl:choose>
+          <xsl:when test="count(/*[local-name()='rss']/*[local-name()='channel']/*[local-name()='item']) &gt; 0">
+            <xsl:for-each select="/*[local-name()='rss']/*[local-name()='channel']/*[local-name()='item']">
           <div class="item">
             <div class="title"><a href="{link}"><xsl:value-of select="title" /></a></div>
             <div class="meta"><xsl:value-of select="pubDate" /></div>
@@ -36,7 +40,12 @@
               </xsl:choose>
             </div>
           </div>
-        </xsl:for-each>
+            </xsl:for-each>
+          </xsl:when>
+          <xsl:otherwise>
+            <div class="item">No items.</div>
+          </xsl:otherwise>
+        </xsl:choose>
       </body>
     </html>
   </xsl:template>

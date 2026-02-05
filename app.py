@@ -1014,7 +1014,7 @@ def rss_feed(
 
         xml = (
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-            "<?xml-stylesheet type=\"text/xsl\" href=\"/rss.xsl\"?>"
+            "<?xml-stylesheet type=\"text/xsl\" href=\"/rss.xsl?v=2\"?>"
             "<rss version=\"2.0\" xmlns:content=\"http://purl.org/rss/1.0/modules/content/\" xmlns:media=\"http://search.yahoo.com/mrss/\">"
             "<channel>"
             f"<title>{_xml_escape(channel_title)}</title>"
@@ -1122,7 +1122,11 @@ def admin_posts_ui(credentials: HTTPBasicCredentials = Depends(security)):
 
 @app.get("/rss.xsl")
 def rss_xsl():
-    return FileResponse("admin/rss.xsl", media_type="text/xsl")
+    headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+    }
+    return FileResponse("admin/rss.xsl", media_type="text/xsl", headers=headers)
 
 
 @app.get("/admin/db")

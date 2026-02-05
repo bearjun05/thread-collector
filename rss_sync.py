@@ -261,7 +261,7 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
 
     xml = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-        "<?xml-stylesheet type=\"text/xsl\" href=\"/rss.xsl\"?>"
+        "<?xml-stylesheet type=\"text/xsl\" href=\"/rss.xsl?v=2\"?>"
         "<rss version=\"2.0\" xmlns:content=\"http://purl.org/rss/1.0/modules/content/\" xmlns:media=\"http://search.yahoo.com/mrss/\">"
         "<channel>"
         f"<title>{_xml_escape(channel_title)}</title>"

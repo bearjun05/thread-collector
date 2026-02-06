@@ -17,6 +17,7 @@
           .meta { color: #666; font-size: 12px; margin-bottom: 12px; }
           .content img { max-width: 100%; border-radius: 10px; margin: 8px 0; }
           .content video { max-width: 100%; margin: 8px 0; }
+          .content iframe { width: 100%; min-height: 315px; border: 0; border-radius: 10px; margin: 8px 0; }
         </style>
       </head>
       <body>

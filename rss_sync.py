@@ -11,6 +11,16 @@ from dateutil import parser as date_parser
 from email.utils import format_datetime
 
 from scraper import scrape_threads_profile_with_replies
+from rss_render import (
+    xml_escape as _xml_escape,
+    build_description_html as _shared_build_description_html,
+    build_content_html as _shared_build_content_html,
+    collect_youtube_embeds as _shared_collect_youtube_embeds,
+    reply_texts_from_dicts as _reply_texts_from_dicts,
+    build_enclosures as _build_enclosures,
+    build_media_contents as _build_media_contents,
+    build_media_players as _build_media_players,
+)
 
 DB_PATH = os.environ.get("RSS_DB_PATH", os.path.join("db", "rss_cache.db"))
 SCHEMA_PATH = os.environ.get("RSS_SCHEMA_PATH", os.path.join("db", "schema.sql"))
@@ -110,52 +120,37 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
 
 
-def _xml_escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&apos;")
-    )
-
-
-def _format_text_html(text: str) -> str:
-    escaped = _xml_escape(text or "")
-    return escaped.replace("\n", "<br/>")
+def _collect_youtube_embeds(root_text: str, replies: List[Dict[str, Any]]) -> List[str]:
+    return _shared_collect_youtube_embeds(root_text, _reply_texts_from_dicts(replies))
 
 
 def _build_description_html(root_text: str, replies: List[Dict[str, Any]]) -> str:
-    parts = []
-    if (root_text or "").strip():
-        parts.append(_format_text_html(root_text.strip()))
-    for rep in replies or []:
-        rep_text = (rep.get("text") or "").strip()
-        if rep_text:
-            parts.append(_format_text_html(rep_text))
-    return "<br/><br/>".join(parts)
+    return _shared_build_description_html(root_text, _reply_texts_from_dicts(replies))
 
-def _media_html(media_urls: List[str]) -> str:
-    chunks = []
-    for url in media_urls:
-        lower = url.lower()
-        if any(ext in lower for ext in [".mp4", ".webm"]):
-            chunks.append(f"<video controls src=\"{_xml_escape(url)}\"></video>")
-        else:
-            chunks.append(f"<img src=\"{_xml_escape(url)}\" />")
-    return "<br/>".join(chunks)
-
-def _build_content_html(root_text: str, replies: List[Dict[str, Any]], media_urls: List[str]) -> str:
-    parts = []
-    if (root_text or "").strip():
-        parts.append(f"<p>{_xml_escape(root_text.strip())}</p>")
-    for rep in replies or []:
-        rep_text = (rep.get("text") or "").strip()
-        if rep_text:
-            parts.append(f"<p>{_xml_escape(rep_text)}</p>")
-    if media_urls:
-        parts.append(_media_html(media_urls))
-    return "".join(parts)
+def _build_content_html(
+    root_text: str,
+    replies: List[Dict[str, Any]],
+    root_media_urls: List[str],
+    media_urls: List[str],
+    youtube_embeds: List[str],
+) -> str:
+    content_blocks = [{"text": root_text, "media_urls": root_media_urls}]
+    for reply in replies or []:
+        reply_media = reply.get("media") or []
+        reply_media_urls = [m.get("url") for m in reply_media if m.get("url")]
+        content_blocks.append(
+            {
+                "text": reply.get("text") or "",
+                "media_urls": reply_media_urls,
+            }
+        )
+    return _shared_build_content_html(
+        root_text,
+        _reply_texts_from_dicts(replies),
+        media_urls,
+        youtube_embeds,
+        content_blocks=content_blocks,
+    )
 
 
 def _get_cache_policy(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -217,8 +212,10 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
         media = r.get("media", [])
         desc_html = _build_description_html(root_text, replies)
         media_urls = []
+        root_media_urls = []
         if media:
-            media_urls.extend([m.get("url") for m in media if m.get("url")])
+            root_media_urls = [m.get("url") for m in media if m.get("url")]
+            media_urls.extend(root_media_urls)
         if replies:
             for rep in replies:
                 rep_media = rep.get("media", [])
@@ -237,15 +234,11 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
                     title_source = rep_text
                     break
         title = (title_source or "(no title)").split("\n")[0][:80]
-        enclosures = "".join(
-            f"<enclosure url=\"{_xml_escape(mu)}\" length=\"0\" type=\"{_xml_escape(_guess_mime(mu))}\" />"
-            for mu in media_urls
-        )
-        media_contents = "".join(
-            f"<media:content url=\"{_xml_escape(mu)}\" type=\"{_xml_escape(_guess_mime(mu))}\" />"
-            for mu in media_urls
-        )
-        content_html = _build_content_html(root_text, replies, media_urls)
+        enclosures = _build_enclosures(media_urls)
+        media_contents = _build_media_contents(media_urls)
+        youtube_embeds = _collect_youtube_embeds(root_text, replies)
+        media_players = _build_media_players(youtube_embeds)
+        content_html = _build_content_html(root_text, replies, root_media_urls, media_urls, youtube_embeds)
         items.append(
             f"<item>"
             f"<title>{_xml_escape(title)}</title>"
@@ -256,6 +249,7 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
             f"<content:encoded><![CDATA[{content_html}]]></content:encoded>"
             f"{enclosures}"
             f"{media_contents}"
+            f"{media_players}"
             f"</item>"
         )
 
@@ -272,23 +266,6 @@ def _build_rss_xml(username: str, rows: List[Dict[str, Any]]) -> tuple[str, str,
     )
     etag = hashlib.sha256(xml.encode("utf-8")).hexdigest()
     return xml, etag, last_modified
-
-
-def _guess_mime(url: str) -> str:
-    lower = url.lower()
-    if ".jpg" in lower or ".jpeg" in lower:
-        return "image/jpeg"
-    if ".png" in lower:
-        return "image/png"
-    if ".webp" in lower:
-        return "image/webp"
-    if ".gif" in lower:
-        return "image/gif"
-    if ".mp4" in lower:
-        return "video/mp4"
-    if ".webm" in lower:
-        return "video/webm"
-    return "application/octet-stream"
 
 
 def _parse_media_json(raw: Optional[str]) -> List[Dict[str, Any]]:

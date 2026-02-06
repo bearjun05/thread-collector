@@ -6,6 +6,9 @@ from urllib.parse import parse_qs, urlparse
 
 _URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 _YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_BLOCK_DIVIDER_HTML = (
+    "<hr style=\"border:0;border-top:1px solid #eee7db;margin:10px 0;opacity:0.7;\" />"
+)
 
 
 def xml_escape(text: str) -> str:
@@ -74,7 +77,9 @@ def build_content_html(
 ) -> str:
     parts: List[str] = []
     if content_blocks:
-        for block in content_blocks:
+        for index, block in enumerate(content_blocks):
+            if index > 0:
+                parts.append(_BLOCK_DIVIDER_HTML)
             block_media = _dedupe_urls(block.get("media_urls") or [])
             if block_media:
                 parts.append(_media_html(block_media))

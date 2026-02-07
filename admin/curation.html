@@ -55,6 +55,14 @@
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; vertical-align: top; }
     th { color: var(--muted); font-weight: 600; }
+    thead th:nth-child(1) { width: 28px; }
+    thead th:nth-child(2) { width: 44px; }
+    thead th:nth-child(3) { width: 46px; }
+    thead th:nth-child(4) { width: 120px; }
+    thead th:nth-child(5) { width: 110px; }
+    thead th:nth-child(6) { width: 220px; }
+    thead th:nth-child(7) { width: 360px; }
+    thead th:nth-child(8) { width: 210px; }
     .w100 { width: 100%; }
     .muted { color: var(--muted); font-size: 12px; }
     .pill {
@@ -67,6 +75,96 @@
     }
     .drag { cursor: move; color: var(--muted); font-size: 16px; }
     .detail { background: #fff9ef; }
+    .editor-input {
+      width: 100%;
+      min-width: 180px;
+      box-sizing: border-box;
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+    }
+    .editor-textarea {
+      width: 100%;
+      min-width: 280px;
+      min-height: 96px;
+      box-sizing: border-box;
+      padding: 10px;
+      line-height: 1.5;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+      resize: vertical;
+    }
+    .detail-wrap {
+      display: grid;
+      grid-template-columns: 1fr 220px;
+      gap: 12px;
+      align-items: start;
+    }
+    .detail-media {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+      padding: 8px;
+    }
+    .detail-media img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #f6f0e2;
+    }
+    .detail-divider {
+      border: 0;
+      border-top: 1px solid #eadfc7;
+      margin: 10px 0;
+    }
+    .preview-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .preview-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fffef9;
+      padding: 10px;
+    }
+    .preview-card img {
+      width: 100%;
+      height: 150px;
+      object-fit: cover;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #f3ebda;
+      margin-bottom: 8px;
+    }
+    .preview-card h4 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      line-height: 1.35;
+    }
+    .preview-card .meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .preview-card .summary {
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      margin-bottom: 8px;
+    }
+    .preview-card .line {
+      display: block;
+      width: 100%;
+      height: 1px;
+      background: #eadfc7;
+      margin: 8px 0;
+    }
     pre {
       background: #111;
       color: #e8e8e8;
@@ -117,6 +215,8 @@
         </div>
         <div class="row" style="margin-top:8px;">
           <button class="secondary" onclick="reloadCandidates()">Reload List</button>
+          <button class="secondary" onclick="toggleAllDetails(true)">Open All Details</button>
+          <button class="secondary" onclick="toggleAllDetails(false)">Close All Details</button>
           <button class="secondary" onclick="saveOrder()">Save Order</button>
           <span id="status" class="muted">ready</span>
         </div>
@@ -143,6 +243,7 @@
 
       <section class="card">
         <h3>Preview</h3>
+        <div id="previewCards" class="preview-cards"></div>
         <pre id="preview">(Run 4) Preview 버튼을 누르세요.</pre>
       </section>
     </main>
@@ -276,13 +377,27 @@
         const out = [];
         out.push(`run_id=${data.run_id}`);
         out.push("");
+        const previewCards = document.getElementById("previewCards");
+        previewCards.innerHTML = "";
         let i = 1;
         for (const it of (data.items || [])) {
           out.push(`${i}. "${it.title}"`);
           out.push(`   ${it.summary}`);
           out.push(`   ${it.url}`);
+          if (it.image_url) out.push(`   image=${it.image_url}`);
           out.push(`   score=${Number(it.llm_total_score || 0).toFixed(2)} / rule=${Number(it.rule_score || 0).toFixed(2)}`);
           out.push("---");
+          const card = document.createElement("article");
+          card.className = "preview-card";
+          card.innerHTML = `
+            ${it.image_url ? `<img src="${escapeAttr(it.image_url)}" alt="preview image" loading="lazy" />` : ""}
+            <h4>${i}. ${escapeText(it.title || "")}</h4>
+            <div class="meta">@${escapeText(it.username || "")} | ${escapeText(it.created_at || "-")}</div>
+            <span class="line"></span>
+            <div class="summary">${escapeText(it.summary || "")}</div>
+            <a href="${escapeAttr(it.url || "#")}" target="_blank" rel="noopener">Open source post</a>
+          `;
+          previewCards.appendChild(card);
           i += 1;
         }
         document.getElementById("preview").textContent = out.join("\n");
@@ -325,11 +440,12 @@
     }
 
     function renderRows() {
-      const tbody = document.getElementById("rows");
-      tbody.innerHTML = "";
+        const tbody = document.getElementById("rows");
+        tbody.innerHTML = "";
       for (const c of candidates) {
         const title = c.edited_title || c.generated_title || "";
         const summary = c.edited_summary || c.generated_summary || "";
+        const imageUrl = c.edited_image_url || c.representative_image_url || "";
         const tr = document.createElement("tr");
         tr.dataset.id = String(c.id);
         tr.draggable = true;
@@ -346,8 +462,8 @@
             <div class="muted">${Number(c.impact || 0).toFixed(0)}/${Number(c.novelty || 0).toFixed(0)}/${Number(c.utility || 0).toFixed(0)}/${Number(c.accessibility || 0).toFixed(0)}</div>
           </td>
           <td>@${escapeText(c.username || "")}</td>
-          <td><input id="title-${c.id}" class="w100" value="${escapeAttr(title)}" /></td>
-          <td><textarea id="summary-${c.id}" class="w100">${escapeText(summary)}</textarea></td>
+          <td><input id="title-${c.id}" class="editor-input" value="${escapeAttr(title)}" /></td>
+          <td><textarea id="summary-${c.id}" class="editor-textarea">${escapeText(summary)}</textarea></td>
           <td>
             <div class="row">
               <button class="secondary" onclick="toggleDetail(${c.id})">Detail</button>
@@ -365,8 +481,17 @@
         detail.style.display = "none";
         detail.innerHTML = `
           <td colspan="8">
-            <div class="muted">post_id=${escapeText(c.post_id || "")} | created_at=${escapeText(c.created_at || "-")} | url=${escapeText(c.url || "")}</div>
-            <pre>${escapeText(c.full_text || "")}</pre>
+            <div class="detail-wrap">
+              <div>
+                <div class="muted">post_id=${escapeText(c.post_id || "")} | created_at=${escapeText(c.created_at || "-")} | url=${escapeText(c.url || "")}</div>
+                <hr class="detail-divider" />
+                <pre>${escapeText(c.full_text || "")}</pre>
+              </div>
+              <div class="detail-media">
+                ${imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="representative image" loading="lazy" />` : `<div class="muted">no representative image</div>`}
+                <div class="muted" style="margin-top:8px; word-break:break-all;">${imageUrl ? escapeText(imageUrl) : ""}</div>
+              </div>
+            </div>
           </td>
         `;
         tbody.appendChild(detail);
@@ -377,6 +502,14 @@
       const row = document.getElementById(`detail-${id}`);
       if (!row) return;
       row.style.display = row.style.display === "none" ? "" : "none";
+    }
+
+    function toggleAllDetails(open) {
+      for (const c of candidates) {
+        const row = document.getElementById(`detail-${c.id}`);
+        if (!row) continue;
+        row.style.display = open ? "" : "none";
+      }
     }
 
     async function saveOne(id) {

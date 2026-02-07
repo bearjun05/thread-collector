@@ -1,5 +1,6 @@
 """Threads 스크래퍼 API 서버"""
 import asyncio
+import html
 import json
 import os
 import secrets
@@ -8,6 +9,8 @@ import traceback
 from email.utils import format_datetime
 import hashlib
 import subprocess
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Literal
 
@@ -88,6 +91,66 @@ def _require_admin(credentials: HTTPBasicCredentials) -> None:
         raise HTTPException(status_code=500, detail="ADMIN_PASSWORD is not set")
     if credentials.username != admin_user or credentials.password != admin_password:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _normalize_media_url(raw: str) -> str:
+    val = html.unescape((raw or "").strip())
+    if not val:
+        return ""
+    return val
+
+
+def _is_allowed_media_host(host: str) -> bool:
+    h = (host or "").lower()
+    if not h:
+        return False
+    allowed_suffixes = (
+        "cdninstagram.com",
+        "fbcdn.net",
+        "instagram.com",
+        "threads.net",
+    )
+    return any(h == s or h.endswith(f".{s}") for s in allowed_suffixes)
+
+
+@app.get("/admin/api/image-proxy")
+def admin_image_proxy(
+    url: str,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    clean = _normalize_media_url(url)
+    if not clean:
+        raise HTTPException(status_code=400, detail="url is required")
+    parsed = urllib.parse.urlsplit(clean)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="invalid scheme")
+    if not _is_allowed_media_host(parsed.hostname or ""):
+        raise HTTPException(status_code=400, detail="host not allowed")
+    req = urllib.request.Request(
+        clean,
+        headers={
+            "User-Agent": "Mozilla/5.0 (ThreadCollector/1.0)",
+            "Accept": "image/*,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = resp.read()
+            if len(body) > 15 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="image too large")
+            content_type = (resp.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip()
+            return Response(
+                content=body,
+                media_type=content_type,
+                headers={
+                    "Cache-Control": "public, max-age=900",
+                },
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"image fetch failed: {str(e)}")
 
 
 def _get_db_conn() -> sqlite3.Connection:

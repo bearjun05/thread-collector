@@ -534,6 +534,12 @@
       return one.length > n ? `${one.slice(0, n)}...` : one;
     }
 
+    function proxiedImageUrl(rawUrl) {
+      const u = String(rawUrl || "").trim();
+      if (!u) return "";
+      return `/admin/api/image-proxy?url=${encodeURIComponent(u)}`;
+    }
+
     function updateRemoveMeta() {
       const total = candidates.length;
       const marked = Array.from(markedForRemove).filter(id => candidates.some(c => c.id === id)).length;
@@ -721,8 +727,9 @@
           out.push("---");
           const card = document.createElement("article");
           card.className = "preview-card";
+          const imageSrc = it.image_url ? proxiedImageUrl(it.image_url) : "";
           card.innerHTML = `
-            ${it.image_url ? `<img src="${escapeAttr(it.image_url)}" alt="preview image" loading="lazy" />` : ""}
+            ${imageSrc ? `<img src="${escapeAttr(imageSrc)}" alt="preview image" loading="lazy" />` : ""}
             <h4>${i}. ${escapeText(it.title || "")}</h4>
             <div class="meta">@${escapeText(it.username || "")} | ${escapeText(it.created_at || "-")}</div>
             <span class="line"></span>
@@ -800,6 +807,7 @@
         const title = c.edited_title || c.generated_title || "";
         const summary = c.edited_summary || c.generated_summary || "";
         const imageUrl = c.edited_image_url || c.representative_image_url || "";
+        const imageSrc = imageUrl ? proxiedImageUrl(imageUrl) : "";
         const rawPreview = compactText(c.full_text || "", 180);
         const haystack = [
           c.username || "",
@@ -832,7 +840,7 @@
           </td>
           <td>
             <div class="thumb-box">
-              ${imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="representative image" loading="lazy" onerror="this.parentElement.textContent='image fail';" />` : `no image`}
+              ${imageSrc ? `<img src="${escapeAttr(imageSrc)}" alt="representative image" loading="lazy" onerror="this.parentElement.textContent='image fail';" />` : `no image`}
             </div>
           </td>
           <td>
@@ -864,7 +872,7 @@
                 <pre>${escapeText(c.full_text || "")}</pre>
               </div>
               <div class="detail-media">
-                ${imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="representative image" loading="lazy" />` : `<div class="muted">no representative image</div>`}
+                ${imageSrc ? `<img src="${escapeAttr(imageSrc)}" alt="representative image" loading="lazy" onerror="this.parentElement.innerHTML='<div class=&quot;muted&quot;>image fail</div>';" />` : `<div class="muted">no representative image</div>`}
                 <div class="muted" style="margin-top:8px; word-break:break-all;">${imageUrl ? escapeText(imageUrl) : ""}</div>
               </div>
             </div>

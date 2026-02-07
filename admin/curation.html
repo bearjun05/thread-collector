@@ -242,9 +242,9 @@
       margin: 10px 0;
     }
     .preview-cards {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-      gap: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
       margin-bottom: 12px;
     }
     .preview-card {
@@ -276,7 +276,13 @@
       font-size: 13px;
       line-height: 1.45;
       white-space: pre-wrap;
+      word-break: break-word;
       margin-bottom: 8px;
+    }
+    .preview-card a {
+      display: inline-block;
+      max-width: 100%;
+      word-break: break-all;
     }
     .preview-card .line {
       display: block;

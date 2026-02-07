@@ -1973,9 +1973,7 @@ def _publication_items(conn, publication_id: int, limit: int) -> List[Dict[str, 
 def _digest_body(items: List[Dict[str, Any]]) -> str:
     if not items:
         return "<p>No curated items.</p>"
-    first = items[0]
-    top_line = f'"{xml_escape(first.get("title") or "")}"'
-    parts = [f"<p>{top_line}</p>"]
+    parts: List[str] = []
     for index, it in enumerate(items):
         kst = _to_kst(_parse_dt(it.get("created_at")))
         dt_text = kst.strftime("%m.%d %H:%M (KST)") if kst else ""

@@ -1,8 +1,9 @@
 """Shared RSS rendering helpers for API and cache builder."""
 
+import html
 import re
 from typing import Any, Dict, List, Optional, Sequence
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 _URL_RE = re.compile(r"https?://[^\s<>'\"]+")
 _YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -22,18 +23,23 @@ def xml_escape(text: str) -> str:
 
 
 def guess_mime(url: str) -> str:
-    lower = url.lower()
-    if ".jpg" in lower or ".jpeg" in lower:
+    raw = _normalize_media_url(url)
+    nested = _unwrap_nested_url(raw)
+    lower_candidates = [raw.lower()]
+    if nested:
+        lower_candidates.append(nested.lower())
+
+    if _contains_any(lower_candidates, [".jpg", ".jpeg"]):
         return "image/jpeg"
-    if ".png" in lower:
+    if _contains_any(lower_candidates, [".png"]):
         return "image/png"
-    if ".webp" in lower:
+    if _contains_any(lower_candidates, [".webp"]):
         return "image/webp"
-    if ".gif" in lower:
+    if _contains_any(lower_candidates, [".gif"]):
         return "image/gif"
-    if ".mp4" in lower:
+    if _contains_any(lower_candidates, [".mp4"]):
         return "video/mp4"
-    if ".webm" in lower:
+    if _contains_any(lower_candidates, [".webm"]):
         return "video/webm"
     return "application/octet-stream"
 
@@ -120,14 +126,14 @@ def collect_youtube_embeds(root_text: str, reply_texts: Sequence[str]) -> List[s
 
 def build_enclosures(media_urls: Sequence[str]) -> str:
     return "".join(
-        f"<enclosure url=\"{xml_escape(media_url)}\" length=\"0\" type=\"{xml_escape(guess_mime(media_url))}\" />"
+        f"<enclosure url=\"{xml_escape(_normalize_media_url(media_url))}\" length=\"0\" type=\"{xml_escape(guess_mime(media_url))}\" />"
         for media_url in media_urls
     )
 
 
 def build_media_contents(media_urls: Sequence[str]) -> str:
     return "".join(
-        f"<media:content url=\"{xml_escape(media_url)}\" type=\"{xml_escape(guess_mime(media_url))}\" />"
+        f"<media:content url=\"{xml_escape(_normalize_media_url(media_url))}\" type=\"{xml_escape(guess_mime(media_url))}\" />"
         for media_url in media_urls
     )
 
@@ -143,10 +149,11 @@ def _dedupe_urls(urls: Sequence[str]) -> List[str]:
     seen = set()
     deduped: List[str] = []
     for url in urls:
-        if not url or url in seen:
+        normalized = _normalize_media_url(url)
+        if not normalized or normalized in seen:
             continue
-        seen.add(url)
-        deduped.append(url)
+        seen.add(normalized)
+        deduped.append(normalized)
     return deduped
 
 
@@ -195,11 +202,12 @@ def _youtube_id_from_url(url: str) -> Optional[str]:
 def _media_html(media_urls: Sequence[str]) -> str:
     chunks: List[str] = []
     for url in media_urls:
-        lower = url.lower()
-        if any(ext in lower for ext in [".mp4", ".webm"]):
-            chunks.append(f"<video controls src=\"{xml_escape(url)}\"></video>")
+        normalized = _normalize_media_url(url)
+        mime = guess_mime(normalized)
+        if mime.startswith("video/"):
+            chunks.append(f"<video controls src=\"{xml_escape(normalized)}\"></video>")
         else:
-            chunks.append(f"<img src=\"{xml_escape(url)}\" />")
+            chunks.append(f"<img src=\"{xml_escape(normalized)}\" />")
     return "<br/>".join(chunks)
 
 
@@ -216,3 +224,28 @@ def _youtube_html(embed_urls: Sequence[str]) -> str:
             "</div>"
         )
     return "".join(chunks)
+
+
+def _contains_any(candidates: Sequence[str], needles: Sequence[str]) -> bool:
+    for c in candidates:
+        if not c:
+            continue
+        if any(n in c for n in needles):
+            return True
+    return False
+
+
+def _normalize_media_url(url: str) -> str:
+    return html.unescape((url or "").strip())
+
+
+def _unwrap_nested_url(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+        q = parse_qs(parsed.query)
+        nested = (q.get("url") or [None])[0]
+        if not nested:
+            return ""
+        return html.unescape(unquote(str(nested))).strip()
+    except Exception:
+        return ""

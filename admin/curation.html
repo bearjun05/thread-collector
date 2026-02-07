@@ -91,6 +91,10 @@
       background: #fdecec;
       color: #8a2020;
     }
+    .cost-chip.live {
+      background: #e8f3ff;
+      color: #184e86;
+    }
     .cost-chip.delta-up {
       background: #feeceb;
       color: #7f1d1d;
@@ -337,11 +341,11 @@
             <div id="stepMeta1" class="step-meta">stage1 cost: -</div>
           </div>
           <div class="step">
-            <button onclick="step2Score()">2) Score</button>
+            <button id="step2" onclick="step2Score()">2) Score</button>
             <div id="stepMeta2" class="step-meta">stage2 cost: -</div>
           </div>
           <div class="step">
-            <button onclick="step3Summarize()">3) Generate Title/Summary</button>
+            <button id="step3" onclick="step3Summarize()">3) Generate Title/Summary</button>
             <div id="stepMeta3" class="step-meta">stage3 cost: -</div>
           </div>
           <div class="step">
@@ -354,6 +358,7 @@
           </div>
         </div>
         <div class="cost-bar">
+          <span id="liveStage" class="cost-chip">Live: idle</span>
           <span id="runState" class="cost-chip">Run state: -</span>
           <span id="scoreProgress" class="cost-chip">Score: -</span>
           <span id="summaryProgress" class="cost-chip">Summary: -</span>
@@ -442,6 +447,7 @@
     let lastCostSnapshot = null;
     const markedForRemove = new Set();
     let runStatusPollTimer = null;
+    let activeStage = null;
 
     async function api(path, options = {}) {
       const res = await fetch(path, options);
@@ -489,6 +495,25 @@
       const el = document.getElementById(`stepMeta${stepNo}`);
       if (!el) return;
       el.textContent = lines.join("\n");
+    }
+
+    function setLiveStage(text, running = false) {
+      const el = document.getElementById("liveStage");
+      el.textContent = `Live: ${text}`;
+      el.className = running ? "cost-chip live" : "cost-chip";
+    }
+
+    function setStageButtonsBusy(isBusy) {
+      const ids = [
+        ["step2", "2) Score"],
+        ["step3", "3) Generate Title/Summary"],
+      ];
+      for (const [id, label] of ids) {
+        const btn = document.getElementById(id);
+        if (!btn) continue;
+        btn.disabled = isBusy;
+        btn.textContent = isBusy ? `${label} (running...)` : label;
+      }
     }
 
     function signUsd(v) {
@@ -560,10 +585,16 @@
         clearInterval(runStatusPollTimer);
         runStatusPollTimer = null;
       }
+      activeStage = null;
+      setLiveStage("idle", false);
+      setStageButtonsBusy(false);
     }
 
-    function startRunStatusPolling(runId) {
+    function startRunStatusPolling(runId, stageNo) {
       stopRunStatusPolling();
+      activeStage = stageNo || null;
+      setLiveStage(`stage${stageNo} running`, true);
+      setStageButtonsBusy(true);
       runStatusPollTimer = setInterval(() => {
         checkRunStatus(runId, true);
       }, 1500);
@@ -575,6 +606,23 @@
         const res = await api(`/admin/api/curation/run-status?run_id=${targetRunId}`);
         const data = await res.json();
         applyRunStatus(data);
+        if ((data.status || "") === "running" && activeStage === 3) {
+          setStepMeta(3, [
+            "stage3 running...",
+            `summary progress: ${formatInt(data.summarized_candidates || 0)}/${formatInt(data.total_candidates || 0)} (${pct(data.summary_progress_pct)})`,
+            `score progress: ${formatInt(data.scored_candidates || 0)}/${formatInt(data.total_candidates || 0)} (${pct(data.score_progress_pct)})`,
+            `run spend: ${formatUsd(data.run_total_spend_usd || 0)}`,
+          ]);
+          setLiveStage(`stage3 running (${formatInt(data.summarized_candidates || 0)}/${formatInt(data.total_candidates || 0)})`, true);
+        }
+        if ((data.status || "") === "running" && activeStage === 2) {
+          setStepMeta(2, [
+            "stage2 running...",
+            `score progress: ${formatInt(data.scored_candidates || 0)}/${formatInt(data.total_candidates || 0)} (${pct(data.score_progress_pct)})`,
+            `run spend: ${formatUsd(data.run_total_spend_usd || 0)}`,
+          ]);
+          setLiveStage(`stage2 running (${formatInt(data.scored_candidates || 0)}/${formatInt(data.total_candidates || 0)})`, true);
+        }
         if (!silent) {
           setStatus(
             `run=${targetRunId} status=${data.status || "-"} score=${data.scored_candidates || 0}/${data.total_candidates || 0} summary=${data.summarized_candidates || 0}/${data.total_candidates || 0}`
@@ -722,7 +770,7 @@
       let run_id = null;
       try {
         run_id = parseRunId();
-        startRunStatusPolling(run_id);
+        startRunStatusPolling(run_id, 2);
         setStatus("stage2 scoring...");
         await checkRunStatus(run_id, true);
         const res = await api("/admin/api/curation/stage2/score", {
@@ -754,7 +802,7 @@
       let run_id = null;
       try {
         run_id = parseRunId();
-        startRunStatusPolling(run_id);
+        startRunStatusPolling(run_id, 3);
         setStatus("stage3 summarizing...");
         await checkRunStatus(run_id, true);
         const res = await api("/admin/api/curation/stage3/summarize", {

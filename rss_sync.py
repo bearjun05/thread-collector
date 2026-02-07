@@ -11,6 +11,14 @@ from dateutil import parser as date_parser
 from email.utils import format_datetime
 
 from scraper import scrape_threads_profile_with_replies
+from curation import (
+    ensure_schema as ensure_curation_schema,
+    maybe_generate_daily as curation_maybe_generate_daily,
+    maybe_auto_publish_due as curation_maybe_auto_publish_due,
+    refresh_cache as refresh_curated_cache,
+    ITEM_FEED as CURATED_ITEM_FEED,
+    DIGEST_FEED as CURATED_DIGEST_FEED,
+)
 from rss_render import (
     xml_escape as _xml_escape,
     build_description_html as _shared_build_description_html,
@@ -118,6 +126,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         );
         """
         )
+
+    # Curated RSS tables
+    ensure_curation_schema(conn)
 
 
 def _collect_youtube_embeds(root_text: str, replies: List[Dict[str, Any]]) -> List[str]:
@@ -480,6 +491,14 @@ async def run_once(usernames: Optional[List[str]] = None, max_total_posts: Optio
         if not accounts:
             print("[rss_sync] No accounts in feed_sources. Nothing to do.")
             _log("No accounts to scrape.")
+            try:
+                curation_maybe_generate_daily(conn, logger=_log)
+                pub = curation_maybe_auto_publish_due(conn, logger=_log)
+                if pub:
+                    refresh_curated_cache(conn, CURATED_ITEM_FEED, limit=10)
+                    refresh_curated_cache(conn, CURATED_DIGEST_FEED, limit=10)
+            except Exception as curation_err:
+                _log(f"[curation] scheduler hook failed: {type(curation_err).__name__}: {curation_err}")
             return
 
         semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)
@@ -525,6 +544,16 @@ async def run_once(usernames: Optional[List[str]] = None, max_total_posts: Optio
                 refresh_rss_cache_for_account(conn, acc["id"], acc["username"])
             except Exception:
                 pass
+
+        try:
+            curation_maybe_generate_daily(conn, logger=_log)
+            pub = curation_maybe_auto_publish_due(conn, logger=_log)
+            if pub:
+                refresh_curated_cache(conn, CURATED_ITEM_FEED, limit=10)
+                refresh_curated_cache(conn, CURATED_DIGEST_FEED, limit=10)
+                _log("[curation] refreshed curated RSS cache after publish")
+        except Exception as curation_err:
+            _log(f"[curation] scheduler hook failed: {type(curation_err).__name__}: {curation_err}")
         duration = int((datetime.now(timezone.utc) - started_at).total_seconds())
         summary = (
             f"Done. accounts_total={len(accounts)} success={success_accounts} failed={failed_accounts} "

@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Thread Collector Admin - Curation</title>
+  <style>
+    :root {
+      --bg: #f5f1e8;
+      --ink: #1a1a1a;
+      --muted: #5a5a5a;
+      --accent: #204c3d;
+      --accent-2: #e7d9b9;
+      --danger: #a63c3c;
+      --warn: #c56a00;
+      --panel: #fffdf7;
+      --border: #d9cfb8;
+      --font: "IBM Plex Sans", "Space Grotesk", "Segoe UI", sans-serif;
+    }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 600px at 10% -10%, #fff7e6 0%, transparent 60%),
+                  radial-gradient(900px 500px at 110% 10%, #f0f7f1 0%, transparent 60%),
+                  var(--bg);
+      color: var(--ink);
+      font-family: var(--font);
+    }
+    .layout { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+    .sidebar { padding: 20px; border-right: 1px solid var(--border); background: #fbf7ee; }
+    .sidebar h1 { font-size: 16px; margin: 0 0 16px; }
+    .nav a { display: block; padding: 8px 10px; margin-bottom: 6px; text-decoration: none; color: var(--ink); border-radius: 8px; }
+    .nav a.active { background: var(--accent); color: #fff; }
+    main { padding: 20px 28px 32px; }
+    header { margin-bottom: 12px; }
+    header h2 { margin: 0; font-size: 18px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.04);
+      margin-bottom: 16px;
+    }
+    h3 { margin: 0 0 12px; font-size: 16px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    input, textarea, button, select {
+      font-family: var(--font);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      font-size: 14px;
+      background: #fff;
+    }
+    textarea { min-height: 74px; resize: vertical; width: 100%; }
+    button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+    button.secondary { background: var(--accent-2); color: var(--ink); border-color: var(--accent-2); }
+    button.danger { background: var(--danger); border-color: var(--danger); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: #e8efe6;
+      color: #215a43;
+    }
+    .pill.warn { background: #ffe9cc; color: var(--warn); }
+    .pill.off { background: #f3e3e3; color: #8c2c2c; }
+    .warn-box {
+      border: 1px solid #f0cb99;
+      background: #fff4e4;
+      color: #7f4b00;
+      padding: 8px 10px;
+      border-radius: 10px;
+      font-size: 13px;
+    }
+    .muted { color: var(--muted); font-size: 13px; }
+    .candidate-row.dragging { opacity: 0.5; }
+    .drag-handle { cursor: move; color: var(--muted); font-size: 18px; line-height: 1; }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    pre {
+      background: #111;
+      color: #e8e8e8;
+      border-radius: 12px;
+      padding: 12px;
+      max-height: 360px;
+      overflow: auto;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .nowrap { white-space: nowrap; }
+    .w100 { width: 100%; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>Thread Collector</h1>
+      <nav class="nav">
+        <a href="/admin">Dashboard</a>
+        <a href="/admin/posts">Posts</a>
+        <a class="active" href="/admin/curation">Curation</a>
+        <a href="/admin/tokens">Tokens</a>
+        <a href="/admin/settings">Settings</a>
+        <a href="/admin/db">DB</a>
+      </nav>
+    </aside>
+    <main>
+      <header>
+        <h2>AI Curation</h2>
+      </header>
+
+      <section class="card">
+        <h3>Config</h3>
+        <div class="grid" style="margin-bottom: 8px;">
+          <label>Candidate Generation
+            <select id="cfgCandidate">
+              <option value="true">ON</option>
+              <option value="false">OFF</option>
+            </select>
+          </label>
+          <label>Auto Publish
+            <select id="cfgAutoPublish">
+              <option value="true">ON</option>
+              <option value="false">OFF</option>
+            </select>
+          </label>
+          <label>RSS Public
+            <select id="cfgRssPublic">
+              <option value="true">ON</option>
+              <option value="false">OFF</option>
+            </select>
+          </label>
+          <label>LLM
+            <select id="cfgLlmEnabled">
+              <option value="true">ON</option>
+              <option value="false">OFF</option>
+            </select>
+          </label>
+          <label>Daily Cost Target (Soft)
+            <input id="cfgTargetSpend" type="number" min="0" step="0.01" />
+          </label>
+          <label>Daily Run Time (KST)
+            <input id="cfgRunTime" type="time" />
+          </label>
+          <label>Publish Delay (min)
+            <input id="cfgPublishDelay" type="number" min="0" max="1440" />
+          </label>
+          <label>Feed Size
+            <input id="cfgFeedSize" type="number" min="1" max="50" />
+          </label>
+        </div>
+        <div class="row">
+          <button class="secondary" onclick="saveConfig()">Save Config</button>
+          <span class="muted">Soft target only: 초과해도 파이프라인은 중단되지 않습니다.</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Run & Publish</h3>
+        <div class="row" style="margin-bottom: 8px;">
+          <button onclick="runNow()">Run Candidate Generation</button>
+          <button class="secondary" onclick="approveAll()">Approve All</button>
+          <button class="secondary" onclick="publishNow()">Publish Selected</button>
+          <button class="secondary" onclick="refreshCuratedCache()">Refresh Curated Cache</button>
+          <button class="secondary" onclick="reloadAll()">Reload</button>
+        </div>
+        <div class="split">
+          <div>
+            <div id="budgetWarn" class="warn-box" style="display:none;"></div>
+            <div class="row" style="margin-top:8px;">
+              <span class="pill" id="statAvg7">avg7d: -</span>
+              <span class="pill" id="statAvg30">avg30d: -</span>
+              <span class="pill" id="statPerPost">per-post: -</span>
+              <span class="pill" id="statPerPub">per-publication: -</span>
+            </div>
+          </div>
+          <div>
+            <div class="muted">Current publication</div>
+            <div id="publicationInfo" class="muted">-</div>
+            <div class="muted" style="margin-top:8px;">Feed URLs</div>
+            <div class="muted">/v2/rss/curated?token=...&limit=10</div>
+            <div class="muted">/v2/rss/curated/digest?token=...</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Runs</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Date (KST)</th>
+              <th>Status</th>
+              <th>Posts</th>
+              <th>LLM Eval</th>
+              <th>Spend</th>
+              <th>Budget</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="runsBody"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h3>Candidates <span id="candRunLabel" class="muted"></span></h3>
+        <div class="row" style="margin-bottom:8px;">
+          <button class="secondary" onclick="saveOrder()">Save DnD Order</button>
+          <span class="muted">드래그해서 순서 변경 후 저장하세요.</span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>#</th>
+              <th>Use</th>
+              <th>Status</th>
+              <th>Title</th>
+              <th>Summary</th>
+              <th>Image</th>
+              <th>Score</th>
+              <th>Link</th>
+              <th>Save</th>
+            </tr>
+          </thead>
+          <tbody id="candidatesBody"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h3>Digest Preview</h3>
+        <pre id="digestPreview">(no candidates)</pre>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    let currentRunId = null;
+    let candidates = [];
+    let dragSourceId = null;
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, options);
+      if (!res.ok) {
+        const text = await res.text();
+        alert("API error: " + text);
+        throw new Error(text);
+      }
+      return res;
+    }
+
+    function isoToLocal(iso) {
+      if (!iso) return "-";
+      try { return new Date(iso).toLocaleString(); } catch (_) { return iso; }
+    }
+
+    async function reloadAll() {
+      await loadConfig();
+      await loadStats();
+      await loadPublication();
+      await loadRuns();
+      if (currentRunId) await loadCandidates(currentRunId);
+    }
+
+    async function loadConfig() {
+      const res = await api("/admin/api/curation/config");
+      const c = await res.json();
+      document.getElementById("cfgCandidate").value = c.candidate_generation_enabled ? "true" : "false";
+      document.getElementById("cfgAutoPublish").value = c.auto_publish_enabled ? "true" : "false";
+      document.getElementById("cfgRssPublic").value = c.rss_public_enabled ? "true" : "false";
+      document.getElementById("cfgLlmEnabled").value = c.llm_enabled ? "true" : "false";
+      document.getElementById("cfgTargetSpend").value = c.target_daily_spend_usd ?? 1.0;
+      document.getElementById("cfgRunTime").value = c.daily_run_time_kst || "06:00";
+      document.getElementById("cfgPublishDelay").value = c.publish_delay_minutes ?? 60;
+      document.getElementById("cfgFeedSize").value = c.feed_size ?? 10;
+    }
+
+    async function saveConfig() {
+      const payload = {
+        candidate_generation_enabled: document.getElementById("cfgCandidate").value === "true",
+        auto_publish_enabled: document.getElementById("cfgAutoPublish").value === "true",
+        rss_public_enabled: document.getElementById("cfgRssPublic").value === "true",
+        llm_enabled: document.getElementById("cfgLlmEnabled").value === "true",
+        target_daily_spend_usd: Number(document.getElementById("cfgTargetSpend").value),
+        daily_run_time_kst: document.getElementById("cfgRunTime").value,
+        publish_delay_minutes: Number(document.getElementById("cfgPublishDelay").value),
+        feed_size: Number(document.getElementById("cfgFeedSize").value),
+      };
+      await api("/admin/api/curation/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      await reloadAll();
+    }
+
+    async function loadStats() {
+      const res = await api("/admin/api/curation/stats?days=30");
+      const d = await res.json();
+      const avg7 = Number(d.avg_daily_spend_7d || 0).toFixed(4);
+      const avg30 = Number(d.avg_daily_spend_30d || 0).toFixed(4);
+      const totalPosts = (d.daily || []).reduce((acc, x) => acc + Number(x.total_posts || 0), 0);
+      const totalSpend = (d.daily || []).reduce((acc, x) => acc + Number(x.llm_spend_usd || 0), 0);
+      const perPost = totalPosts > 0 ? (totalSpend / totalPosts) : 0;
+      const perPub = Number(d.total_publications || 0) > 0 ? (totalSpend / Number(d.total_publications || 0)) : 0;
+      document.getElementById("statAvg7").textContent = `avg7d: $${avg7}`;
+      document.getElementById("statAvg30").textContent = `avg30d: $${avg30}`;
+      document.getElementById("statPerPost").textContent = `per-post: $${perPost.toFixed(5)}`;
+      document.getElementById("statPerPub").textContent = `per-publication: $${perPub.toFixed(4)}`;
+
+      const warn = document.getElementById("budgetWarn");
+      if (d.latest_run_over_target) {
+        warn.style.display = "block";
+        warn.textContent = `경고: Daily Cost Target (Soft) ${d.target_daily_spend_usd} USD를 초과했습니다. (중단 없음)`;
+      } else {
+        warn.style.display = "none";
+        warn.textContent = "";
+      }
+    }
+
+    async function loadPublication() {
+      const res = await api("/admin/api/curation/publication");
+      const d = await res.json();
+      const p = d.publication;
+      const box = document.getElementById("publicationInfo");
+      if (!p) {
+        box.textContent = "No publication yet";
+        return;
+      }
+      box.textContent = `id=${p.id}, run_id=${p.run_id}, items=${p.item_count}, mode=${p.publish_mode}, at=${isoToLocal(p.published_at)}`;
+    }
+
+    async function loadRuns() {
+      const res = await api("/admin/api/curation/runs?limit=30");
+      const data = await res.json();
+      const tbody = document.getElementById("runsBody");
+      tbody.innerHTML = "";
+      const runs = data.runs || [];
+      if (!currentRunId && runs.length) currentRunId = runs[0].id;
+
+      for (const r of runs) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${r.id}</td>
+          <td>${r.run_date_kst}</td>
+          <td><span class="pill ${r.status === "failed" ? "off" : ""}">${r.status}</span></td>
+          <td>${r.total_posts}</td>
+          <td>${r.llm_eval_count}</td>
+          <td>$${Number(r.llm_spend_usd || 0).toFixed(6)}</td>
+          <td>${r.budget_over_target ? '<span class="pill warn">OVER</span>' : '<span class="pill">OK</span>'}</td>
+          <td><button class="secondary" onclick="selectRun(${r.id})">Select</button></td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function selectRun(runId) {
+      currentRunId = runId;
+      await loadCandidates(runId);
+    }
+
+    async function loadCandidates(runId) {
+      const res = await api(`/admin/api/curation/candidates?run_id=${runId}`);
+      const data = await res.json();
+      currentRunId = data.run_id;
+      document.getElementById("candRunLabel").textContent = currentRunId ? `(run_id=${currentRunId})` : "";
+      candidates = data.candidates || [];
+      renderCandidates();
+      renderDigestPreview();
+    }
+
+    function renderCandidates() {
+      const tbody = document.getElementById("candidatesBody");
+      tbody.innerHTML = "";
+      for (const c of candidates) {
+        const tr = document.createElement("tr");
+        tr.className = "candidate-row";
+        tr.draggable = true;
+        tr.dataset.id = String(c.id);
+        tr.addEventListener("dragstart", onDragStart);
+        tr.addEventListener("dragover", onDragOver);
+        tr.addEventListener("drop", onDrop);
+        const titleVal = c.edited_title || c.generated_title || "";
+        const summaryVal = c.edited_summary || c.generated_summary || "";
+        const imageVal = c.edited_image_url || c.representative_image_url || "";
+        tr.innerHTML = `
+          <td class="drag-handle">⋮⋮</td>
+          <td class="nowrap">${c.rank_order}</td>
+          <td><input type="checkbox" id="sel-${c.id}" ${c.selected_for_publish ? "checked" : ""} /></td>
+          <td>
+            <select id="status-${c.id}">
+              <option value="pending" ${c.status === "pending" ? "selected" : ""}>pending</option>
+              <option value="approved" ${c.status === "approved" ? "selected" : ""}>approved</option>
+              <option value="rejected" ${c.status === "rejected" ? "selected" : ""}>rejected</option>
+            </select>
+          </td>
+          <td><input class="w100" id="title-${c.id}" value="${escapeAttr(titleVal)}" /></td>
+          <td><textarea id="summary-${c.id}">${escapeText(summaryVal)}</textarea></td>
+          <td><input class="w100" id="image-${c.id}" value="${escapeAttr(imageVal)}" /></td>
+          <td>${Number(c.llm_total_score || c.rule_score || 0).toFixed(2)}</td>
+          <td><a href="${c.url}" target="_blank">open</a></td>
+          <td><button class="secondary" onclick="saveCandidate(${c.id})">Save</button></td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function escapeAttr(s) {
+      return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+    }
+
+    function escapeText(s) {
+      return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    }
+
+    function onDragStart(e) {
+      dragSourceId = Number(e.currentTarget.dataset.id);
+      e.currentTarget.classList.add("dragging");
+    }
+
+    function onDragOver(e) {
+      e.preventDefault();
+    }
+
+    function onDrop(e) {
+      e.preventDefault();
+      const targetId = Number(e.currentTarget.dataset.id);
+      if (!dragSourceId || !targetId || dragSourceId === targetId) return;
+      const fromIdx = candidates.findIndex(c => c.id === dragSourceId);
+      const toIdx = candidates.findIndex(c => c.id === targetId);
+      if (fromIdx < 0 || toIdx < 0) return;
+      const [moved] = candidates.splice(fromIdx, 1);
+      candidates.splice(toIdx, 0, moved);
+      candidates.forEach((c, idx) => { c.rank_order = idx + 1; });
+      renderCandidates();
+      renderDigestPreview();
+      dragSourceId = null;
+    }
+
+    async function saveOrder() {
+      if (!currentRunId) return alert("No run selected");
+      const ordered_ids = candidates.map(c => c.id);
+      await api("/admin/api/curation/reorder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: currentRunId, ordered_ids }),
+      });
+      await loadCandidates(currentRunId);
+    }
+
+    async function saveCandidate(id) {
+      const status = document.getElementById(`status-${id}`).value;
+      const selected_for_publish = document.getElementById(`sel-${id}`).checked;
+      const edited_title = document.getElementById(`title-${id}`).value;
+      const edited_summary = document.getElementById(`summary-${id}`).value;
+      const edited_image_url = document.getElementById(`image-${id}`).value;
+      const action = status === "approved" ? "approve" : (status === "rejected" ? "reject" : "pending");
+      await api(`/admin/api/curation/candidates/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, selected_for_publish, edited_title, edited_summary, edited_image_url }),
+      });
+      const target = candidates.find(c => c.id === id);
+      if (target) {
+        target.status = status;
+        target.selected_for_publish = selected_for_publish;
+        target.edited_title = edited_title;
+        target.edited_summary = edited_summary;
+        target.edited_image_url = edited_image_url;
+      }
+      renderDigestPreview();
+    }
+
+    async function runNow() {
+      await api("/admin/api/curation/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      });
+      await reloadAll();
+      if (currentRunId) await loadCandidates(currentRunId);
+    }
+
+    async function approveAll() {
+      if (!currentRunId) return alert("No run selected");
+      await api("/admin/api/curation/approve-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: currentRunId }),
+      });
+      await loadCandidates(currentRunId);
+    }
+
+    async function publishNow() {
+      if (!currentRunId) return alert("No run selected");
+      await api("/admin/api/curation/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: currentRunId, publish_mode: "manual" }),
+      });
+      await reloadAll();
+    }
+
+    async function refreshCuratedCache() {
+      await api("/admin/api/curation/cache/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ feed_type: "all", limit: 10 }),
+      });
+      alert("Curated cache refreshed.");
+    }
+
+    function renderDigestPreview() {
+      const list = candidates
+        .filter(c => c.selected_for_publish && c.status !== "rejected")
+        .slice(0, 10);
+      const lines = [];
+      if (!list.length) {
+        lines.push("No items.");
+      } else {
+        const firstTitle = list[0].edited_title || list[0].generated_title || "(untitled)";
+        lines.push(`Top line: "${firstTitle}"`);
+        lines.push("");
+        let idx = 1;
+        for (const c of list) {
+          const title = c.edited_title || c.generated_title || "(untitled)";
+          const summary = c.edited_summary || c.generated_summary || "";
+          const createdAt = c.created_at ? new Date(c.created_at).toLocaleString("ko-KR", { hour12: false }) : "-";
+          lines.push(`${idx}. "${title}"`);
+          lines.push(`   summary: ${summary}`);
+          lines.push(`   link: ${c.url}`);
+          lines.push(`   date: ${createdAt}`);
+          lines.push("---");
+          idx += 1;
+        }
+      }
+      document.getElementById("digestPreview").textContent = lines.join("\n");
+    }
+
+    reloadAll();
+  </script>
+</body>
+</html>

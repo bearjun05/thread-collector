@@ -58,6 +58,7 @@ uv run python app.py
 - Admin UI: http://localhost:8001/admin (Basic Auth 필요)
   - Dashboard: `/admin`
   - Posts: `/admin/posts` (스크랩 결과 조회)
+  - Curation: `/admin/curation` (AI 큐레이션 승인/발행)
   - Tokens: `/admin/tokens`
   - Settings: `/admin/settings`
   - DB: `/admin/db` (DB 테이블 조회/삭제)
@@ -279,6 +280,24 @@ curl -X POST "http://localhost:8001/v2/scrape" \
   }
 }
 ```
+
+---
+
+### 1-2. AI 큐레이션 RSS
+
+큐레이션은 관리자 승인 기반(반자동)이며 RSS는 2종을 제공합니다.
+
+- 개별 아이템 피드: `GET /v2/rss/curated?token=...&limit=10`
+- Digest 피드: `GET /v2/rss/curated/digest?token=...`
+
+토큰 정책:
+- `scope=curated` 또는 `scope=global` 토큰으로 접근 가능
+- 기존 계정별 RSS(`scope=username`)와 분리됨
+
+특징:
+- Soft budget 목표(`target_daily_spend_usd`) 초과 시에도 파이프라인 중단 없음
+- 초과 시 `budget_over_target=true` 및 Admin 경고 배지 표시
+- Digest 각 항목에 요약 + 원문 링크 + 원문 날짜(KST) 포함
 
 **실제 응답 예시 (2026-02-04 기준, username=choi.openai, flat, include_replies=false):**
 ```json

@@ -43,6 +43,26 @@ from rss_render import (
     build_media_contents as _build_media_contents,
     build_media_players as _build_media_players,
 )
+from curation import (
+    ensure_schema as ensure_curation_schema,
+    get_config as curation_get_config,
+    update_config as curation_update_config,
+    run_curation_once as curation_run_once,
+    list_runs as curation_list_runs,
+    list_candidates as curation_list_candidates,
+    update_candidate as curation_update_candidate,
+    approve_all as curation_approve_all,
+    reorder_candidates as curation_reorder_candidates,
+    publish_run as curation_publish_run,
+    latest_ready_run as curation_latest_ready_run,
+    latest_publication as curation_latest_publication,
+    maybe_auto_publish_due as curation_maybe_auto_publish_due,
+    refresh_cache as curation_refresh_cache,
+    get_cached_feed as curation_get_cached_feed,
+    stats as curation_stats,
+    ITEM_FEED as CURATED_ITEM_FEED,
+    DIGEST_FEED as CURATED_DIGEST_FEED,
+)
 
 # 한국 표준 시간대 (KST = UTC+9)
 KST = timezone(timedelta(hours=9))
@@ -70,6 +90,7 @@ def _get_db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(RSS_DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON")
     ensure_rss_schema(conn)
+    ensure_curation_schema(conn)
     return conn
 
 
@@ -617,6 +638,64 @@ class AdminCachePolicyUpdate(BaseModel):
     ttl_seconds: Optional[int] = Field(None, ge=30, le=86400)
 
 
+class CurationConfigUpdate(BaseModel):
+    candidate_generation_enabled: Optional[bool] = None
+    auto_publish_enabled: Optional[bool] = None
+    rss_public_enabled: Optional[bool] = None
+    target_daily_spend_usd: Optional[float] = Field(None, ge=0.0)
+    daily_run_time_kst: Optional[str] = None
+    publish_delay_minutes: Optional[int] = Field(None, ge=0, le=1440)
+    feed_size: Optional[int] = Field(None, ge=1, le=50)
+    window_hours: Optional[int] = Field(None, ge=1, le=168)
+    candidate_pool_size: Optional[int] = Field(None, ge=1, le=200)
+    w_impact: Optional[float] = Field(None, ge=0.0, le=1.0)
+    w_novelty: Optional[float] = Field(None, ge=0.0, le=1.0)
+    w_utility: Optional[float] = Field(None, ge=0.0, le=1.0)
+    w_accessibility: Optional[float] = Field(None, ge=0.0, le=1.0)
+    recommend_threshold: Optional[int] = Field(None, ge=0, le=100)
+    min_utility: Optional[int] = Field(None, ge=0, le=100)
+    min_accessibility: Optional[int] = Field(None, ge=0, le=100)
+    pick_easy: Optional[int] = Field(None, ge=0, le=100)
+    pick_deep: Optional[int] = Field(None, ge=0, le=100)
+    pick_action: Optional[int] = Field(None, ge=0, le=100)
+    openrouter_model: Optional[str] = None
+    input_cost_per_1m: Optional[float] = Field(None, ge=0.0)
+    output_cost_per_1m: Optional[float] = Field(None, ge=0.0)
+    llm_enabled: Optional[bool] = None
+
+
+class CurationRunRequest(BaseModel):
+    force: bool = True
+
+
+class CurationCandidateUpdate(BaseModel):
+    action: Optional[Literal["approve", "reject", "pending"]] = None
+    edited_title: Optional[str] = None
+    edited_summary: Optional[str] = None
+    edited_image_url: Optional[str] = None
+    selected_for_publish: Optional[bool] = None
+    review_note: Optional[str] = None
+
+
+class CurationReorderRequest(BaseModel):
+    run_id: int
+    ordered_ids: List[int] = Field(..., min_length=1)
+
+
+class CurationApproveAllRequest(BaseModel):
+    run_id: int
+
+
+class CurationPublishRequest(BaseModel):
+    run_id: Optional[int] = None
+    publish_mode: str = "manual"
+
+
+class CurationCacheRefreshRequest(BaseModel):
+    feed_type: Literal["all", "item", "digest"] = "all"
+    limit: int = Field(10, ge=1, le=100)
+
+
 class BatchScrapeItem(BaseModel):
     """배치 스크래핑 결과 항목"""
     username: str
@@ -1099,6 +1178,107 @@ def rss_feed(
         conn.close()
 
 
+def _authorize_curated_rss_request(
+    conn: sqlite3.Connection,
+    request: Request,
+    token: str,
+) -> int:
+    tok = conn.execute(
+        "SELECT id, scope, is_active FROM tokens WHERE token = ?",
+        (token,),
+    ).fetchone()
+    if not tok or not tok[2]:
+        _log_invalid_token(conn, token, "curated", request, 401)
+        raise HTTPException(status_code=401, detail="invalid token")
+    token_id = int(tok[0])
+    scope = str(tok[1] or "")
+    if scope not in ("global", "*", "curated"):
+        _log_token_request(conn, token_id, "curated", request, 403)
+        raise HTTPException(status_code=403, detail="token scope mismatch")
+
+    rl = _get_rate_limit(conn)
+    window = int(datetime.now(timezone.utc).timestamp()) // rl["window_seconds"]
+    row = conn.execute(
+        "SELECT count FROM rss_token_counters WHERE token_id = ? AND window_start = ?",
+        (token_id, window),
+    ).fetchone()
+    if row and row[0] >= rl["max_requests"]:
+        _log_token_request(conn, token_id, "curated", request, 429)
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
+    if row:
+        conn.execute(
+            "UPDATE rss_token_counters SET count = count + 1 WHERE token_id = ? AND window_start = ?",
+            (token_id, window),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO rss_token_counters (token_id, window_start, count) VALUES (?, ?, 1)",
+            (token_id, window),
+        )
+    conn.commit()
+    return token_id
+
+
+def _serve_curated_feed(
+    request: Request,
+    token: str,
+    feed_type: str,
+    limit: int,
+) -> Response:
+    conn = _get_db_conn()
+    try:
+        token_id = _authorize_curated_rss_request(conn, request, token)
+        cfg = curation_get_config(conn)
+        if not bool(cfg.get("rss_public_enabled", 1)):
+            _log_token_request(conn, token_id, "curated", request, 403)
+            raise HTTPException(status_code=403, detail="curated rss is disabled")
+
+        cached = curation_get_cached_feed(conn, feed_type, limit)
+        etag = cached.get("etag")
+        last_modified = cached.get("last_modified")
+        xml = cached.get("xml") or ""
+
+        inm = request.headers.get("if-none-match")
+        ims = request.headers.get("if-modified-since")
+        if inm and etag and inm == etag:
+            _log_token_request(conn, token_id, "curated", request, 304)
+            return PlainTextResponse("", status_code=304)
+        if ims and last_modified and ims == last_modified:
+            _log_token_request(conn, token_id, "curated", request, 304)
+            return PlainTextResponse("", status_code=304)
+
+        headers = {}
+        if etag:
+            headers["ETag"] = etag
+        if last_modified:
+            headers["Last-Modified"] = last_modified
+        _log_token_request(conn, token_id, "curated", request, 200)
+        return Response(
+            content=xml.encode("utf-8"),
+            media_type="application/rss+xml; charset=utf-8",
+            headers=headers,
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/v2/rss/curated")
+def rss_curated_feed(
+    request: Request,
+    token: str = Query(..., description="Curated RSS token (scope=curated/global)"),
+    limit: int = Query(10, ge=1, le=100),
+):
+    return _serve_curated_feed(request, token, CURATED_ITEM_FEED, limit)
+
+
+@app.get("/v2/rss/curated/digest")
+def rss_curated_digest(
+    request: Request,
+    token: str = Query(..., description="Curated RSS token (scope=curated/global)"),
+):
+    return _serve_curated_feed(request, token, CURATED_DIGEST_FEED, 10)
+
+
 @app.get("/")
 async def root():
     """API 루트 엔드포인트"""
@@ -1111,7 +1291,10 @@ async def root():
             "POST /v2/scrape": "🧼 새 응답 형식 - 단일 계정 스크래핑",
             "POST /v2/batch-scrape": "🧼 새 응답 형식 - 배치 스크래핑",
             "GET /v2/rss": "🧾 계정별 RSS 피드 (token 필요)",
+            "GET /v2/rss/curated": "🧠 AI 큐레이션 RSS (10개 item)",
+            "GET /v2/rss/curated/digest": "🧠 AI 큐레이션 Digest RSS (1개 item)",
             "GET /admin": "🔐 관리자 UI",
+            "GET /admin/curation": "🔐 큐레이션 승인/발행 UI",
             "GET /search-users": "사용자 검색 (자동완성)",
             "GET /scrape-thread": "개별 게시물과 답글 수집",
             "GET /health": "서버 상태 확인",
@@ -1150,6 +1333,12 @@ def admin_settings_ui(credentials: HTTPBasicCredentials = Depends(security)):
 def admin_posts_ui(credentials: HTTPBasicCredentials = Depends(security)):
     _require_admin(credentials)
     return FileResponse("admin/posts.html")
+
+
+@app.get("/admin/curation")
+def admin_curation_ui(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    return FileResponse("admin/curation.html")
 
 
 @app.get("/rss.xsl")
@@ -1340,6 +1529,13 @@ ALLOWED_DB_TABLES = {
     "rss_feed_cache",
     "rss_cache_policy",
     "rss_schedule",
+    "curation_config",
+    "curation_runs",
+    "curation_candidates",
+    "curation_llm_cache",
+    "curation_publications",
+    "curation_publication_items",
+    "curated_rss_cache",
 }
 
 
@@ -1791,6 +1987,217 @@ def admin_update_rss_cache_policy(
         )
         conn.commit()
         return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/curation/config")
+def admin_get_curation_config(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        return curation_get_config(conn)
+    finally:
+        conn.close()
+
+
+@app.patch("/admin/api/curation/config")
+def admin_update_curation_config(
+    payload: CurationConfigUpdate,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    updates = payload.model_dump(exclude_none=True)
+    if "daily_run_time_kst" in updates:
+        value = str(updates["daily_run_time_kst"] or "").strip()
+        try:
+            hh, mm = value.split(":")
+            hh_i = int(hh)
+            mm_i = int(mm)
+            if hh_i < 0 or hh_i > 23 or mm_i < 0 or mm_i > 59:
+                raise ValueError
+            updates["daily_run_time_kst"] = f"{hh_i:02d}:{mm_i:02d}"
+        except Exception:
+            raise HTTPException(status_code=400, detail="daily_run_time_kst must be HH:MM")
+    conn = _get_db_conn()
+    try:
+        return curation_update_config(conn, updates)
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/curation/run")
+def admin_run_curation(
+    payload: CurationRunRequest,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        run_result = curation_run_once(conn, force=payload.force, logger=_append_log)
+        auto_pub_result = curation_maybe_auto_publish_due(conn, logger=_append_log)
+        if auto_pub_result:
+            curation_refresh_cache(conn, CURATED_ITEM_FEED, 10)
+            curation_refresh_cache(conn, CURATED_DIGEST_FEED, 10)
+            _append_log("[curation] cache refreshed after auto publish")
+        return {"status": "ok", "run": run_result, "auto_publish": auto_pub_result}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/curation/runs")
+def admin_list_curation_runs(
+    limit: int = 30,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        return {"runs": curation_list_runs(conn, limit=limit)}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/curation/candidates")
+def admin_list_curation_candidates(
+    run_id: Optional[int] = None,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        return curation_list_candidates(conn, run_id)
+    finally:
+        conn.close()
+
+
+@app.patch("/admin/api/curation/candidates/{candidate_id}")
+def admin_update_curation_candidate(
+    candidate_id: int,
+    payload: CurationCandidateUpdate,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    updates = payload.model_dump(exclude_none=True)
+    conn = _get_db_conn()
+    try:
+        curation_update_candidate(conn, candidate_id, updates, reviewed_by=credentials.username)
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/curation/approve-all")
+def admin_curation_approve_all(
+    payload: CurationApproveAllRequest,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        curation_approve_all(conn, payload.run_id, reviewed_by=credentials.username)
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/curation/reorder")
+def admin_curation_reorder(
+    payload: CurationReorderRequest,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    ordered_ids = []
+    seen = set()
+    for cid in payload.ordered_ids:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        ordered_ids.append(cid)
+    if not ordered_ids:
+        raise HTTPException(status_code=400, detail="ordered_ids is empty")
+    conn = _get_db_conn()
+    try:
+        curation_reorder_candidates(conn, payload.run_id, ordered_ids)
+        return {"status": "ok", "count": len(ordered_ids)}
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/curation/publish")
+def admin_curation_publish(
+    payload: CurationPublishRequest,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        run_id = payload.run_id or curation_latest_ready_run(conn)
+        if not run_id:
+            raise HTTPException(status_code=400, detail="no ready run")
+        result = curation_publish_run(
+            conn,
+            run_id,
+            publish_mode=payload.publish_mode or "manual",
+            published_by=credentials.username,
+            logger=_append_log,
+        )
+        curation_refresh_cache(conn, CURATED_ITEM_FEED, 10)
+        curation_refresh_cache(conn, CURATED_DIGEST_FEED, 10)
+        _append_log(f"[curation] manual publish run_id={run_id} and cache refreshed")
+        return {"status": "ok", "run_id": run_id, **result}
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/curation/cache/refresh")
+def admin_curation_refresh_cache(
+    payload: CurationCacheRefreshRequest,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        targets: List[str] = []
+        if payload.feed_type in ("all", "item"):
+            targets.append(CURATED_ITEM_FEED)
+        if payload.feed_type in ("all", "digest"):
+            targets.append(CURATED_DIGEST_FEED)
+        refreshed: Dict[str, Dict[str, Any]] = {}
+        for feed_type in targets:
+            refreshed[feed_type] = curation_refresh_cache(conn, feed_type, payload.limit)
+        _append_log(
+            f"[curation] cache refresh feed_type={payload.feed_type} limit={payload.limit} targets={targets}"
+        )
+        return {"status": "ok", "refreshed": refreshed}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/curation/publication")
+def admin_curation_publication(credentials: HTTPBasicCredentials = Depends(security)):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        return {"publication": curation_latest_publication(conn)}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/curation/stats")
+def admin_curation_stats(
+    days: int = 30,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        data = curation_stats(conn, days=days)
+        cfg = curation_get_config(conn)
+        runs = curation_list_runs(conn, limit=1)
+        data["target_daily_spend_usd"] = float(cfg.get("target_daily_spend_usd", 1.0))
+        data["latest_run_over_target"] = bool(runs[0]["budget_over_target"]) if runs else False
+        return data
     finally:
         conn.close()
 

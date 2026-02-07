@@ -13,7 +13,7 @@ from email.utils import format_datetime
 from scraper import scrape_threads_profile_with_replies
 from curation import (
     ensure_schema as ensure_curation_schema,
-    maybe_generate_daily as curation_maybe_generate_daily,
+    run_curation_once as curation_run_once,
     maybe_auto_publish_due as curation_maybe_auto_publish_due,
     refresh_cache as refresh_curated_cache,
     ITEM_FEED as CURATED_ITEM_FEED,
@@ -447,9 +447,18 @@ def insert_posts(
         return 0
     conn.executemany(
         """
-        INSERT OR IGNORE INTO posts
+        INSERT INTO posts
         (source_id, post_id, url, text, media_json, created_at, scraped_at, is_reply, parent_post_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(post_id) DO UPDATE SET
+          source_id=excluded.source_id,
+          url=excluded.url,
+          text=excluded.text,
+          media_json=excluded.media_json,
+          created_at=excluded.created_at,
+          scraped_at=excluded.scraped_at,
+          is_reply=excluded.is_reply,
+          parent_post_id=excluded.parent_post_id
         """,
         payload,
     )
@@ -491,14 +500,6 @@ async def run_once(usernames: Optional[List[str]] = None, max_total_posts: Optio
         if not accounts:
             print("[rss_sync] No accounts in feed_sources. Nothing to do.")
             _log("No accounts to scrape.")
-            try:
-                curation_maybe_generate_daily(conn, logger=_log)
-                pub = curation_maybe_auto_publish_due(conn, logger=_log)
-                if pub:
-                    refresh_curated_cache(conn, CURATED_ITEM_FEED, limit=10)
-                    refresh_curated_cache(conn, CURATED_DIGEST_FEED, limit=10)
-            except Exception as curation_err:
-                _log(f"[curation] scheduler hook failed: {type(curation_err).__name__}: {curation_err}")
             return
 
         semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)
@@ -546,7 +547,9 @@ async def run_once(usernames: Optional[List[str]] = None, max_total_posts: Optio
                 pass
 
         try:
-            curation_maybe_generate_daily(conn, logger=_log)
+            # Trigger curation immediately after scrape run. run_curation_once handles
+            # same-day deduplication and will skip when already generated.
+            curation_run_once(conn, force=False, scraped_since=started_at, logger=_log)
             pub = curation_maybe_auto_publish_due(conn, logger=_log)
             if pub:
                 refresh_curated_cache(conn, CURATED_ITEM_FEED, limit=10)

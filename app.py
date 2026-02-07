@@ -659,6 +659,7 @@ class CurationConfigUpdate(BaseModel):
     pick_deep: Optional[int] = Field(None, ge=0, le=100)
     pick_action: Optional[int] = Field(None, ge=0, le=100)
     openrouter_model: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
     input_cost_per_1m: Optional[float] = Field(None, ge=0.0)
     output_cost_per_1m: Optional[float] = Field(None, ge=0.0)
     llm_enabled: Optional[bool] = None
@@ -1996,7 +1997,12 @@ def admin_get_curation_config(credentials: HTTPBasicCredentials = Depends(securi
     _require_admin(credentials)
     conn = _get_db_conn()
     try:
-        return curation_get_config(conn)
+        cfg = curation_get_config(conn)
+        key = str(cfg.get("openrouter_api_key") or "").strip()
+        if "openrouter_api_key" in cfg:
+            del cfg["openrouter_api_key"]
+        cfg["has_openrouter_api_key"] = bool(key)
+        return cfg
     finally:
         conn.close()
 

@@ -52,6 +52,7 @@ DEFAULT_CURATION_CONFIG: Dict[str, Any] = {
     "pick_deep": 2,
     "pick_action": 2,
     "openrouter_model": "openai/gpt-4o-mini",
+    "openrouter_api_key": None,
     # soft pricing for visibility only; user can tune in admin
     "input_cost_per_1m": 0.15,
     "output_cost_per_1m": 0.60,
@@ -87,6 +88,7 @@ def ensure_schema(conn) -> None:
           pick_deep INTEGER NOT NULL DEFAULT 2,
           pick_action INTEGER NOT NULL DEFAULT 2,
           openrouter_model TEXT NOT NULL DEFAULT 'openai/gpt-4o-mini',
+          openrouter_api_key TEXT,
           input_cost_per_1m REAL NOT NULL DEFAULT 0.15,
           output_cost_per_1m REAL NOT NULL DEFAULT 0.60,
           prompt_version TEXT NOT NULL DEFAULT 'v1',
@@ -204,6 +206,10 @@ def ensure_schema(conn) -> None:
         CREATE INDEX IF NOT EXISTS idx_curation_publications_run ON curation_publications(run_id);
         """
     )
+    config_cols = {r[1] for r in conn.execute("PRAGMA table_info(curation_config)").fetchall()}
+    if "openrouter_api_key" not in config_cols:
+        conn.execute("ALTER TABLE curation_config ADD COLUMN openrouter_api_key TEXT")
+
     row = conn.execute("SELECT id FROM curation_config WHERE id = 1").fetchone()
     if not row:
         fields = list(DEFAULT_CURATION_CONFIG.keys())
@@ -250,6 +256,7 @@ def update_config(conn, updates: Dict[str, Any]) -> Dict[str, Any]:
         "pick_deep",
         "pick_action",
         "openrouter_model",
+        "openrouter_api_key",
         "input_cost_per_1m",
         "output_cost_per_1m",
         "prompt_version",
@@ -259,6 +266,10 @@ def update_config(conn, updates: Dict[str, Any]) -> Dict[str, Any]:
     values: List[Any] = []
     for key, value in updates.items():
         if key in allowed and value is not None:
+            if key == "openrouter_api_key" and isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    value = None
             fields.append(f"{key} = ?")
             values.append(value)
     if not fields:
@@ -305,13 +316,29 @@ def _avg(values: List[float]) -> float:
     return sum(values) / len(values)
 
 
-def _extract_roots_with_replies(conn, hours: int) -> List[Dict[str, Any]]:
+def _extract_roots_with_replies(
+    conn,
+    hours: int,
+    scraped_since: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
     cutoff = datetime.now(UTC) - timedelta(hours=hours)
-    roots = conn.execute(
-        "SELECT p.post_id, p.source_id, s.username, p.url, p.text, p.media_json, p.created_at "
-        "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
-        "WHERE p.is_reply = 0 ORDER BY p.created_at DESC LIMIT 2000"
-    ).fetchall()
+    if scraped_since:
+        if scraped_since.tzinfo is None:
+            scraped_since = scraped_since.replace(tzinfo=UTC)
+        else:
+            scraped_since = scraped_since.astimezone(UTC)
+        roots = conn.execute(
+            "SELECT p.post_id, p.source_id, s.username, p.url, p.text, p.media_json, p.created_at, p.scraped_at "
+            "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
+            "WHERE p.is_reply = 0 AND p.scraped_at >= ? ORDER BY p.created_at DESC LIMIT 2000",
+            (scraped_since.isoformat(),),
+        ).fetchall()
+    else:
+        roots = conn.execute(
+            "SELECT p.post_id, p.source_id, s.username, p.url, p.text, p.media_json, p.created_at, p.scraped_at "
+            "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
+            "WHERE p.is_reply = 0 ORDER BY p.created_at DESC LIMIT 2000"
+        ).fetchall()
     out: List[Dict[str, Any]] = []
     for r in roots:
         created = _parse_dt(r[6])
@@ -348,6 +375,7 @@ def _extract_roots_with_replies(conn, hours: int) -> List[Dict[str, Any]]:
                 "media_urls": media_urls,
                 "representative_image_url": root_media_urls[0] if root_media_urls else (media_urls[0] if media_urls else None),
                 "created_at": r[6],
+                "scraped_at": r[7],
             }
         )
     return out
@@ -544,6 +572,13 @@ def _evaluate_with_llm(
     return parsed, in_tok, out_tok, float(round(cost, 8))
 
 
+def _resolve_openrouter_api_key(cfg: Dict[str, Any]) -> Optional[str]:
+    key = str(cfg.get("openrouter_api_key") or "").strip()
+    if key:
+        return key
+    return os.environ.get("OPENROUTER_API_KEY")
+
+
 def _summarize_with_llm(
     post: Dict[str, Any],
     cfg: Dict[str, Any],
@@ -671,6 +706,7 @@ def run_curation_once(
     conn,
     *,
     force: bool = False,
+    scraped_since: Optional[datetime] = None,
     logger: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     ensure_schema(conn)
@@ -708,7 +744,11 @@ def run_curation_once(
 
     log = logger or (lambda _: None)
     try:
-        posts = _extract_roots_with_replies(conn, int(cfg.get("window_hours", 24)))
+        posts = _extract_roots_with_replies(
+            conn,
+            int(cfg.get("window_hours", 24)),
+            scraped_since=scraped_since,
+        )
         rule_evaluated = []
         for post in posts:
             rule = _rule_evaluate(post)
@@ -738,7 +778,7 @@ def run_curation_once(
         filtered.sort(key=lambda x: x["rank_score"], reverse=True)
         candidate_pool = filtered[: int(cfg.get("candidate_pool_size", 20))]
 
-        api_key = os.environ.get("OPENROUTER_API_KEY")
+        api_key = _resolve_openrouter_api_key(cfg)
         model = str(cfg.get("openrouter_model", "openai/gpt-4o-mini"))
         prompt_version = str(cfg.get("prompt_version", "v1"))
 
@@ -943,7 +983,7 @@ def _resolve_summary_for_candidate(conn, cand: Dict[str, Any], cfg: Dict[str, An
         summary = str(data.get("summary") or "").strip() or _fallback_summary(post["full_text"])
         return title, summary, cache["input_tokens"], cache["output_tokens"], cache["cost_usd"]
 
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = _resolve_openrouter_api_key(cfg)
     parsed, in_tok, out_tok, cost = _summarize_with_llm(post, cfg, api_key=api_key)
     if parsed:
         _upsert_llm_cache(

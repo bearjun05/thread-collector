@@ -157,9 +157,17 @@
           <label>Feed Size
             <input id="cfgFeedSize" type="number" min="1" max="50" />
           </label>
+          <label>OpenRouter Model
+            <input id="cfgModel" placeholder="openai/gpt-4o-mini" />
+          </label>
+          <label>OpenRouter API Key
+            <input id="cfgApiKey" type="password" placeholder="sk-or-v1-... (blank: keep current)" />
+          </label>
         </div>
         <div class="row">
           <button class="secondary" onclick="saveConfig()">Save Config</button>
+          <button class="secondary" onclick="clearApiKey()">Clear API Key</button>
+          <span id="cfgApiKeyState" class="pill off">API key: not set</span>
           <span class="muted">Soft target only: 초과해도 파이프라인은 중단되지 않습니다.</span>
         </div>
       </section>
@@ -283,6 +291,16 @@
       document.getElementById("cfgRunTime").value = c.daily_run_time_kst || "06:00";
       document.getElementById("cfgPublishDelay").value = c.publish_delay_minutes ?? 60;
       document.getElementById("cfgFeedSize").value = c.feed_size ?? 10;
+      document.getElementById("cfgModel").value = c.openrouter_model || "openai/gpt-4o-mini";
+      document.getElementById("cfgApiKey").value = "";
+      const keyState = document.getElementById("cfgApiKeyState");
+      if (c.has_openrouter_api_key) {
+        keyState.className = "pill";
+        keyState.textContent = "API key: set";
+      } else {
+        keyState.className = "pill off";
+        keyState.textContent = "API key: not set (env fallback)";
+      }
     }
 
     async function saveConfig() {
@@ -295,11 +313,25 @@
         daily_run_time_kst: document.getElementById("cfgRunTime").value,
         publish_delay_minutes: Number(document.getElementById("cfgPublishDelay").value),
         feed_size: Number(document.getElementById("cfgFeedSize").value),
+        openrouter_model: document.getElementById("cfgModel").value.trim(),
       };
+      const keyInput = document.getElementById("cfgApiKey").value.trim();
+      if (keyInput) {
+        payload.openrouter_api_key = keyInput;
+      }
       await api("/admin/api/curation/config", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+      });
+      await reloadAll();
+    }
+
+    async function clearApiKey() {
+      await api("/admin/api/curation/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ openrouter_api_key: "" }),
       });
       await reloadAll();
     }

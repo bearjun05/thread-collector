@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS curation_config (
   pick_deep INTEGER NOT NULL DEFAULT 2,
   pick_action INTEGER NOT NULL DEFAULT 2,
   openrouter_model TEXT NOT NULL DEFAULT 'openai/gpt-4o-mini',
+  openrouter_api_key TEXT,
   input_cost_per_1m REAL NOT NULL DEFAULT 0.15,
   output_cost_per_1m REAL NOT NULL DEFAULT 0.60,
   prompt_version TEXT NOT NULL DEFAULT 'v1',

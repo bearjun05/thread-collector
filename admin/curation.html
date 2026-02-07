@@ -848,6 +848,8 @@
         forceCacheRefresh ? "refreshing cache..." : "loading view..."
       );
       try {
+        let digestChanged = null;
+        let digestUpdatedAt = "";
         let expectedDigestEtag = "";
         if (forceCacheRefresh) {
           const refreshRes = await api("/admin/api/curation/cache/refresh", {
@@ -857,6 +859,15 @@
             body: JSON.stringify({ feed_type: "all", limit: 10 }),
           });
           const refreshData = await refreshRes.json();
+          const digestMeta = (
+            refreshData &&
+            refreshData.refreshed &&
+            refreshData.refreshed.digest
+          ) || null;
+          if (digestMeta) {
+            digestChanged = Boolean(digestMeta.changed);
+            digestUpdatedAt = String(digestMeta.updated_at || "");
+          }
           expectedDigestEtag = (
             refreshData &&
             refreshData.refreshed &&
@@ -873,7 +884,13 @@
             return;
           }
         }
-        setPublishedRefreshState("ok", `ok ${new Date().toLocaleTimeString()}`);
+        if (forceCacheRefresh) {
+          const stamp = digestUpdatedAt || new Date().toLocaleString();
+          const ch = digestChanged === null ? "unknown" : (digestChanged ? "changed" : "unchanged");
+          setPublishedRefreshState("ok", `ok ${ch} @ ${stamp}`);
+        } else {
+          setPublishedRefreshState("ok", `ok ${new Date().toLocaleTimeString()}`);
+        }
         setStatus(forceCacheRefresh ? "published cache refreshed and view reloaded" : "published view reloaded");
       } catch (e) {
         setPublishedRefreshState("err", "failed");

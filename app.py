@@ -2352,7 +2352,26 @@ def admin_curation_refresh_cache(
             targets.append(CURATED_DIGEST_FEED)
         refreshed: Dict[str, Dict[str, Any]] = {}
         for feed_type in targets:
-            refreshed[feed_type] = curation_refresh_cache(conn, feed_type, payload.limit)
+            before = conn.execute(
+                "SELECT etag FROM curated_rss_cache WHERE feed_type = ? AND limit_count = ?",
+                (feed_type, payload.limit),
+            ).fetchone()
+            before_etag = str(before[0]) if before and before[0] else None
+            result = curation_refresh_cache(conn, feed_type, payload.limit)
+            after = conn.execute(
+                "SELECT etag, updated_at FROM curated_rss_cache WHERE feed_type = ? AND limit_count = ?",
+                (feed_type, payload.limit),
+            ).fetchone()
+            after_etag = str(after[0]) if after and after[0] else result.get("etag")
+            updated_at = str(after[1]) if after and after[1] else None
+            xml_size_bytes = len((result.get("xml") or "").encode("utf-8"))
+            refreshed[feed_type] = {
+                "etag": after_etag,
+                "last_modified": result.get("last_modified"),
+                "updated_at": updated_at,
+                "changed": bool(before_etag != after_etag),
+                "xml_size_bytes": int(xml_size_bytes),
+            }
         _append_log(
             f"[curation] cache refresh feed_type={payload.feed_type} limit={payload.limit} targets={targets}"
         )

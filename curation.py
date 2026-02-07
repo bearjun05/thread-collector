@@ -780,17 +780,8 @@ def run_curation_once(
             }
             rule_evaluated.append(post_data)
 
-        # keep only likely relevant posts first
-        filtered = [
-            x
-            for x in rule_evaluated
-            if "off_topic" not in (x["rule"].get("flags") or []) and "too_short" not in (x["rule"].get("flags") or [])
-        ]
-        if not filtered:
-            filtered = rule_evaluated
-
-        filtered.sort(key=lambda x: x["rank_score"], reverse=True)
-        candidate_pool = filtered[: int(cfg.get("candidate_pool_size", 20))]
+        # Rule filter is intentionally disabled for now.
+        candidate_pool = rule_evaluated[: int(cfg.get("candidate_pool_size", 20))]
 
         api_key = _resolve_openrouter_api_key(cfg)
         model = str(cfg.get("openrouter_model", "openai/gpt-4o-mini"))
@@ -844,33 +835,20 @@ def run_curation_once(
             if isinstance(llm_eval, dict) and llm_eval.get("scores"):
                 final_rule = llm_eval
             merged["final_eval"] = final_rule
+            merged["rule_rank_score"] = float(post.get("rank_score", 0))
             fs = final_rule.get("scores", {})
             merged["impact"] = float(fs.get("impact", merged["impact"]))
             merged["novelty"] = float(fs.get("novelty_or_newsworthiness", merged["novelty"]))
             merged["utility"] = float(fs.get("utility", merged["utility"]))
             merged["accessibility"] = float(fs.get("accessibility", merged["accessibility"]))
             merged["difficulty"] = int(fs.get("difficulty", merged["difficulty"]))
-            merged["rank_score"] = _total_score(fs, cfg)
+            merged["llm_rank_score"] = _total_score(fs, cfg)
+            merged["rank_score"] = merged["llm_rank_score"]
             merged["recommended_tier"] = str(final_rule.get("recommended_tier", "borderline"))
             enriched.append(merged)
 
-        # keep yes/borderline and threshold conditions
-        min_utility = float(cfg.get("min_utility", 60))
-        min_accessibility = float(cfg.get("min_accessibility", 55))
-        threshold = float(cfg.get("recommend_threshold", 75))
-        picked = []
-        for item in sorted(enriched, key=lambda x: x["rank_score"], reverse=True):
-            tier = item.get("recommended_tier", "borderline")
-            if tier == "no":
-                continue
-            if item["utility"] < min_utility and item["accessibility"] < min_accessibility:
-                continue
-            if tier == "yes" or item["rank_score"] >= threshold or item["utility"] >= min_utility:
-                picked.append(item)
-        if not picked:
-            picked = sorted(enriched, key=lambda x: x["rank_score"], reverse=True)
-
-        ranked = _select_ranked_candidates(picked, cfg)
+        feed_size = int(cfg.get("feed_size", 10))
+        ranked = sorted(enriched, key=lambda x: x["rank_score"], reverse=True)[:feed_size]
 
         conn.execute("DELETE FROM curation_candidates WHERE run_id = ?", (run_id,))
         for idx, item in enumerate(ranked, start=1):
@@ -890,8 +868,8 @@ def run_curation_once(
                     item.get("full_text"),
                     hashlib.sha256((item.get("full_text") or "").encode("utf-8")).hexdigest(),
                     item.get("representative_image_url"),
-                    float(item.get("rank_score", 0)),
-                    float(item.get("rank_score", 0)),
+                    float(item.get("rule_rank_score", item.get("rank_score", 0))),
+                    float(item.get("llm_rank_score", item.get("rank_score", 0))),
                     float(item.get("impact", 0)),
                     float(item.get("novelty", 0)),
                     float(item.get("utility", 0)),

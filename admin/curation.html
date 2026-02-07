@@ -236,7 +236,8 @@
               <th>Title</th>
               <th>Summary</th>
               <th>Image</th>
-              <th>Score</th>
+              <th>Score (LLM/Rule)</th>
+              <th>Metrics (I/N/U/A)</th>
               <th>Link</th>
               <th>Save</th>
             </tr>
@@ -460,7 +461,18 @@
           <td><input class="w100" id="title-${c.id}" value="${escapeAttr(titleVal)}" /></td>
           <td><textarea id="summary-${c.id}">${escapeText(summaryVal)}</textarea></td>
           <td><input class="w100" id="image-${c.id}" value="${escapeAttr(imageVal)}" /></td>
-          <td>${Number(c.llm_total_score || c.rule_score || 0).toFixed(2)}</td>
+          <td>
+            <strong>${Number(c.llm_total_score || 0).toFixed(2)}</strong>
+            <div class="muted">rule ${Number(c.rule_score || 0).toFixed(2)}</div>
+          </td>
+          <td>
+            <span class="muted">
+              ${Number(c.impact || 0).toFixed(0)} /
+              ${Number(c.novelty || 0).toFixed(0)} /
+              ${Number(c.utility || 0).toFixed(0)} /
+              ${Number(c.accessibility || 0).toFixed(0)}
+            </span>
+          </td>
           <td><a href="${c.url}" target="_blank">open</a></td>
           <td><button class="secondary" onclick="saveCandidate(${c.id})">Save</button></td>
         `;

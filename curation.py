@@ -56,7 +56,7 @@ DEFAULT_CURATION_CONFIG: Dict[str, Any] = {
     # soft pricing for visibility only; user can tune in admin
     "input_cost_per_1m": 0.15,
     "output_cost_per_1m": 0.60,
-    "prompt_version": "v1",
+    "prompt_version": "v2",
     "llm_enabled": 1,
     "updated_at": "",
 }
@@ -220,6 +220,15 @@ def ensure_schema(conn) -> None:
             f"INSERT INTO curation_config ({','.join(fields)}) VALUES ({placeholders})",
             tuple(values),
         )
+    else:
+        # Force new prompt profile once so summary cache can move to Korean style.
+        pv_row = conn.execute("SELECT prompt_version FROM curation_config WHERE id = 1").fetchone()
+        prompt_version = str(pv_row[0] or "").strip() if pv_row else ""
+        if prompt_version in ("", "v1"):
+            conn.execute(
+                "UPDATE curation_config SET prompt_version = ?, updated_at = ? WHERE id = 1",
+                ("v2", now),
+            )
     conn.commit()
 
 
@@ -588,9 +597,14 @@ def _summarize_with_llm(
     if not api_key or not int(cfg.get("llm_enabled", 1)):
         return None, 0, 0, 0.0
     system_prompt = (
-        "Create hook title and concise summary for curated RSS. Return strict JSON only.\n"
-        "Schema: {title:string, summary:string}.\n"
-        "Keep summary factual, short, no hype."
+        "당신은 한국어 AI 큐레이션 에디터다. 반드시 JSON만 출력한다.\n"
+        "Schema: {title:string, summary:string}\n"
+        "규칙:\n"
+        "- title: 한국어 후킹 제목 1문장, 12~42자\n"
+        "- summary: 한국어 3~6문장, 대략 180~420자\n"
+        "- 원문 사실 기반으로 작성, 과장/광고 문구 금지\n"
+        "- 문장형 본문으로 작성, '요약:' 같은 라벨 금지\n"
+        "- 영어가 포함되어도 한국어 설명 중심으로 작성"
     )
     user_prompt = (
         f"post_id: {post.get('post_id')}\n"
@@ -943,10 +957,32 @@ def _fallback_title(text: str) -> str:
 
 
 def _fallback_summary(text: str) -> str:
-    clean = " ".join((text or "").strip().split())
-    if not clean:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
         return "원문 요약 정보가 없습니다."
-    return clean[:240]
+    clean = " ".join(lines)
+    clean = " ".join(clean.split())
+    if len(clean) <= 420:
+        return clean
+    trimmed = clean[:420].rstrip()
+    cut_points = [trimmed.rfind(x) for x in [". ", "다. ", "? ", "! "]]
+    cut = max(cut_points)
+    if cut > 120:
+        return trimmed[: cut + 1].strip()
+    return trimmed
+
+
+def _normalize_summary(summary: str, full_text: str) -> str:
+    s = " ".join((summary or "").split()).strip()
+    if s.lower().startswith("summary:"):
+        s = s[len("summary:") :].strip()
+    if s.startswith("요약:"):
+        s = s[len("요약:") :].strip()
+    if len(s) < 140:
+        s = _fallback_summary(full_text)
+    if len(s) > 520:
+        s = s[:520].rstrip()
+    return s
 
 
 def _resolve_summary_for_candidate(conn, cand: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[str, str, int, int, float]:
@@ -980,7 +1016,7 @@ def _resolve_summary_for_candidate(conn, cand: Dict[str, Any], cfg: Dict[str, An
     if cache:
         data = cache["result"]
         title = str(data.get("title") or "").strip() or _fallback_title(post["full_text"])
-        summary = str(data.get("summary") or "").strip() or _fallback_summary(post["full_text"])
+        summary = _normalize_summary(str(data.get("summary") or "").strip(), post["full_text"])
         return title, summary, cache["input_tokens"], cache["output_tokens"], cache["cost_usd"]
 
     api_key = _resolve_openrouter_api_key(cfg)
@@ -999,7 +1035,7 @@ def _resolve_summary_for_candidate(conn, cand: Dict[str, Any], cfg: Dict[str, An
             cost_usd=cost,
         )
         title = str(parsed.get("title") or "").strip() or _fallback_title(post["full_text"])
-        summary = str(parsed.get("summary") or "").strip() or _fallback_summary(post["full_text"])
+        summary = _normalize_summary(str(parsed.get("summary") or "").strip(), post["full_text"])
         return title, summary, in_tok, out_tok, cost
 
     return _fallback_title(post["full_text"]), _fallback_summary(post["full_text"]), 0, 0, 0.0
@@ -1394,9 +1430,9 @@ def _digest_body(items: List[Dict[str, Any]]) -> str:
         if image_url:
             item_parts.append(f"<img src=\"{xml_escape(image_url)}\" />")
         item_parts.append(f"<p>{summary}</p>")
-        item_parts.append(f"<p>원문: <a href=\"{url}\">{url}</a></p>")
+        item_parts.append(f"<p><a href=\"{url}\">{url}</a></p>")
         if dt_text:
-            item_parts.append(f"<p>작성: {xml_escape(dt_text)}</p>")
+            item_parts.append(f"<p>{xml_escape(dt_text)}</p>")
         parts.append("".join(item_parts))
     return "".join(parts)
 

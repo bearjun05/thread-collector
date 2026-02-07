@@ -272,6 +272,27 @@
       try { return new Date(iso).toLocaleString(); } catch (_) { return iso; }
     }
 
+    function formatKstNoSeconds(iso) {
+      if (!iso) return "-";
+      try {
+        const d = new Date(iso);
+        const dateText = new Intl.DateTimeFormat("ko-KR", {
+          timeZone: "Asia/Seoul",
+          month: "2-digit",
+          day: "2-digit",
+        }).format(d);
+        const timeText = new Intl.DateTimeFormat("ko-KR", {
+          timeZone: "Asia/Seoul",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(d);
+        return `${dateText} ${timeText} (KST)`;
+      } catch (_) {
+        return iso;
+      }
+    }
+
     async function reloadAll() {
       await loadConfig();
       await loadStats();
@@ -567,11 +588,11 @@
         for (const c of list) {
           const title = c.edited_title || c.generated_title || "(untitled)";
           const summary = c.edited_summary || c.generated_summary || "";
-          const createdAt = c.created_at ? new Date(c.created_at).toLocaleString("ko-KR", { hour12: false }) : "-";
+          const createdAt = formatKstNoSeconds(c.created_at);
           lines.push(`${idx}. "${title}"`);
-          lines.push(`   summary: ${summary}`);
-          lines.push(`   link: ${c.url}`);
-          lines.push(`   date: ${createdAt}`);
+          lines.push(`   ${summary}`);
+          lines.push(`   ${c.url}`);
+          lines.push(`   ${createdAt}`);
           lines.push("---");
           idx += 1;
         }

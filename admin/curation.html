@@ -298,6 +298,33 @@
       align-items: center;
       margin-bottom: 8px;
     }
+    .refresh-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #f7f0e3;
+      color: #6f6556;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .refresh-pill.running {
+      border-color: #d6c189;
+      background: #fbf4df;
+      color: #6f5f2c;
+    }
+    .refresh-pill.ok {
+      border-color: #9bc8a9;
+      background: #eaf7ef;
+      color: #1e5a35;
+    }
+    .refresh-pill.err {
+      border-color: #e0a0a0;
+      background: #fceeee;
+      color: #7d2121;
+    }
     .published-list {
       display: flex;
       flex-direction: column;
@@ -461,6 +488,7 @@
         <div class="published-head">
           <button id="btnRefreshView" class="secondary" onclick="refreshPublishedView(false)">Refresh View</button>
           <button id="btnRefreshPublished" class="secondary" onclick="refreshPublishedView(true)">Refresh Cache + View</button>
+          <span id="publishedRefreshState" class="refresh-pill">idle</span>
           <span id="publishedMeta" class="muted">not loaded</span>
         </div>
         <div class="row tight" style="margin-bottom:8px;">
@@ -773,8 +801,22 @@
       }
     }
 
+    function setPublishedRefreshState(kind, message) {
+      const el = document.getElementById("publishedRefreshState");
+      if (!el) return;
+      el.className = "refresh-pill";
+      if (kind === "running") el.classList.add("running");
+      if (kind === "ok") el.classList.add("ok");
+      if (kind === "err") el.classList.add("err");
+      el.textContent = message;
+    }
+
     async function refreshPublishedView(forceCacheRefresh) {
       setRefreshButtonsLoading(true);
+      setPublishedRefreshState(
+        "running",
+        forceCacheRefresh ? "refreshing cache..." : "loading view..."
+      );
       try {
         if (forceCacheRefresh) {
           await api("/admin/api/curation/cache/refresh", {
@@ -785,8 +827,10 @@
           });
         }
         await loadPublishedView();
+        setPublishedRefreshState("ok", `ok ${new Date().toLocaleTimeString()}`);
         setStatus(forceCacheRefresh ? "published cache refreshed and view reloaded" : "published view reloaded");
       } catch (e) {
+        setPublishedRefreshState("err", "failed");
         setStatus(String(e));
       } finally {
         setRefreshButtonsLoading(false);

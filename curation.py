@@ -1994,6 +1994,33 @@ def _digest_body(items: List[Dict[str, Any]]) -> str:
     return "".join(parts)
 
 
+def _digest_media_urls(items: List[Dict[str, Any]]) -> List[str]:
+    seen = set()
+    urls: List[str] = []
+    for it in items:
+        raw = (it.get("image_url") or "").strip()
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        urls.append(raw)
+    return urls
+
+
+def _digest_youtube_embeds(items: List[Dict[str, Any]]) -> List[str]:
+    seen = set()
+    embeds: List[str] = []
+    for it in items:
+        summary = (it.get("summary") or "").strip()
+        if not summary:
+            continue
+        for embed in collect_youtube_embeds(summary, []):
+            if embed in seen:
+                continue
+            seen.add(embed)
+            embeds.append(embed)
+    return embeds
+
+
 def _build_item_feed_xml(publication: Dict[str, Any], items: List[Dict[str, Any]], limit: int) -> Tuple[str, str, Optional[str]]:
     ch_title = "AI Curated Threads Feed"
     ch_link = "https://thread-collector.jotto.in/admin/curation"
@@ -2056,6 +2083,10 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
     digest_link = ch_link
     digest_body = _digest_body(items)
     digest_desc = "Daily curated digest"
+    digest_media_urls = _digest_media_urls(items)
+    digest_enclosures = build_enclosures(digest_media_urls)
+    digest_media_contents = build_media_contents(digest_media_urls)
+    digest_media_players = build_media_players(_digest_youtube_embeds(items))
     pub_date = format_datetime(_parse_dt(publication.get("published_at")) or datetime.now(UTC))
     last_modified = pub_date
     xml = (
@@ -2073,6 +2104,7 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
         f"<pubDate>{pub_date}</pubDate>"
         f"<description>{xml_escape(digest_desc)}</description>"
         f"<content:encoded><![CDATA[{digest_body}]]></content:encoded>"
+        f"{digest_enclosures}{digest_media_contents}{digest_media_players}"
         "</item>"
         "</channel></rss>"
     )

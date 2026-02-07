@@ -41,6 +41,75 @@
       margin-bottom: 16px;
     }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+      margin-bottom: 8px;
+    }
+    .step {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+      background: #fffef8;
+    }
+    .step button {
+      width: 100%;
+      margin-bottom: 6px;
+    }
+    .step-meta {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+      min-height: 34px;
+      white-space: pre-line;
+    }
+    .cost-bar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fffef8;
+      font-size: 13px;
+    }
+    .cost-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #eef4ef;
+      color: #1d5a45;
+      font-size: 12px;
+    }
+    .cost-chip.warn {
+      background: #fdecec;
+      color: #8a2020;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+    .stat-box {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fffef8;
+      padding: 10px;
+    }
+    .stat-label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .stat-value {
+      font-size: 17px;
+      font-weight: 600;
+    }
     input, textarea, button, select {
       font-family: var(--font);
       border-radius: 10px;
@@ -230,18 +299,40 @@
         <div class="row">
           <label>Run ID <input id="runId" style="width:90px;" /></label>
           <label>Hours <input id="hours" type="number" min="1" max="168" value="24" style="width:90px;" /></label>
-          <button onclick="step1List()">1) List Candidates</button>
-          <button onclick="step2Score()">2) Score</button>
-          <button onclick="step3Summarize()">3) Generate Title/Summary</button>
-          <button class="secondary" onclick="step4Preview()">4) Preview</button>
-          <button class="danger" onclick="step5Publish()">5) Publish</button>
-        </div>
-        <div class="row" style="margin-top:8px;">
           <button class="secondary" onclick="reloadCandidates()">Reload List</button>
           <button class="secondary" onclick="toggleAllDetails(true)">Open All Details</button>
           <button class="secondary" onclick="toggleAllDetails(false)">Close All Details</button>
           <button class="secondary" onclick="saveOrder()">Save Order</button>
+          <button class="secondary" onclick="refreshCostStats()">Refresh Cost Stats</button>
           <span id="status" class="muted">ready</span>
+        </div>
+        <div class="steps">
+          <div class="step">
+            <button onclick="step1List()">1) List Candidates</button>
+            <div id="stepMeta1" class="step-meta">stage1 cost: -</div>
+          </div>
+          <div class="step">
+            <button onclick="step2Score()">2) Score</button>
+            <div id="stepMeta2" class="step-meta">stage2 cost: -</div>
+          </div>
+          <div class="step">
+            <button onclick="step3Summarize()">3) Generate Title/Summary</button>
+            <div id="stepMeta3" class="step-meta">stage3 cost: -</div>
+          </div>
+          <div class="step">
+            <button class="secondary" onclick="step4Preview()">4) Preview</button>
+            <div id="stepMeta4" class="step-meta">preview only (no LLM cost)</div>
+          </div>
+          <div class="step">
+            <button class="danger" onclick="step5Publish()">5) Publish</button>
+            <div id="stepMeta5" class="step-meta">publish cost: -</div>
+          </div>
+        </div>
+        <div class="cost-bar">
+          <span id="runCostTotal" class="cost-chip">Run total: -</span>
+          <span id="dayCostTotal" class="cost-chip">Day total: -</span>
+          <span id="runTokenTotal" class="cost-chip">Tokens: -</span>
+          <span id="budgetState" class="cost-chip">Budget: -</span>
         </div>
       </section>
 
@@ -269,6 +360,38 @@
         <h3>Preview</h3>
         <div id="previewCards" class="preview-cards"></div>
         <pre id="preview">(Run 4) Preview 버튼을 누르세요.</pre>
+      </section>
+      <section class="card">
+        <h3>Total Cost (Curation)</h3>
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div class="stat-label">Lifetime Spend</div>
+            <div id="statLifetimeSpend" class="stat-value">-</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Lifetime Runs</div>
+            <div id="statLifetimeRuns" class="stat-value">-</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Lifetime Tokens</div>
+            <div id="statLifetimeTokens" class="stat-value">-</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Avg Daily Spend (7d)</div>
+            <div id="statAvg7d" class="stat-value">-</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Avg Daily Spend (30d)</div>
+            <div id="statAvg30d" class="stat-value">-</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Latest Day Spend</div>
+            <div id="statLatestDay" class="stat-value">-</div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <span id="costStatsUpdated" class="muted">not loaded</span>
+        </div>
       </section>
     </main>
   </div>
@@ -301,6 +424,55 @@
       const v = Number(document.getElementById("runId").value || 0);
       if (!v) throw new Error("run_id required");
       return v;
+    }
+
+    function formatUsd(v) {
+      const n = Number(v || 0);
+      return `$${n.toFixed(6)}`;
+    }
+
+    function formatInt(v) {
+      return Number(v || 0).toLocaleString();
+    }
+
+    function setStepMeta(stepNo, lines) {
+      const el = document.getElementById(`stepMeta${stepNo}`);
+      if (!el) return;
+      el.textContent = lines.join("\n");
+    }
+
+    function applyRunCostSnapshot(data) {
+      if (!data) return;
+      if (data.run_total_spend_usd === undefined) return;
+      document.getElementById("runCostTotal").textContent = `Run total: ${formatUsd(data.run_total_spend_usd)}`;
+      document.getElementById("dayCostTotal").textContent = `Day total: ${formatUsd(data.day_total_spend_usd)}`;
+      document.getElementById("runTokenTotal").textContent =
+        `Tokens: in ${formatInt(data.run_total_input_tokens)} / out ${formatInt(data.run_total_output_tokens)}`;
+      const budgetEl = document.getElementById("budgetState");
+      const over = Boolean(data.budget_over_target);
+      budgetEl.textContent = over ? "Budget: over soft target" : "Budget: within soft target";
+      budgetEl.className = over ? "cost-chip warn" : "cost-chip";
+    }
+
+    async function refreshCostStats() {
+      try {
+        const res = await api("/admin/api/curation/stats?days=365");
+        const s = await res.json();
+        document.getElementById("statLifetimeSpend").textContent = formatUsd(s.lifetime_spend_usd);
+        document.getElementById("statLifetimeRuns").textContent = formatInt(s.lifetime_run_count);
+        document.getElementById("statLifetimeTokens").textContent =
+          `${formatInt(s.lifetime_input_tokens)} / ${formatInt(s.lifetime_output_tokens)}`;
+        document.getElementById("statAvg7d").textContent = formatUsd(s.avg_daily_spend_7d);
+        document.getElementById("statAvg30d").textContent = formatUsd(s.avg_daily_spend_30d);
+        const daily = Array.isArray(s.daily) ? s.daily : [];
+        const latest = daily.length ? daily[daily.length - 1] : null;
+        document.getElementById("statLatestDay").textContent = latest
+          ? `${latest.run_date_kst} ${formatUsd(latest.llm_spend_usd)}`
+          : "-";
+        document.getElementById("costStatsUpdated").textContent = `updated: ${new Date().toLocaleString()}`;
+      } catch (e) {
+        document.getElementById("costStatsUpdated").textContent = `stats load failed: ${String(e)}`;
+      }
     }
 
     async function loadConfig() {
@@ -351,11 +523,18 @@
         const data = await res.json();
         setRunId(data.run_id);
         await reloadCandidates();
+        applyRunCostSnapshot(data);
+        setStepMeta(1, [
+          `stage1 cost: ${formatUsd(data.stage_cost_usd)}`,
+          `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
+          `candidates: ${formatInt(data.candidates || 0)}`,
+        ]);
         const d = data.debug || {};
         setStatus(
           `stage1 done (run_id=${data.run_id}, candidates=${data.candidates || 0}, ` +
           `root_total=${d.root_total ?? "-"}, created_win=${d.root_by_created_window ?? "-"}, scraped_win=${d.root_by_scraped_window ?? "-"})`
         );
+        await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
       }
@@ -365,13 +544,22 @@
       try {
         const run_id = parseRunId();
         setStatus("stage2 scoring...");
-        await api("/admin/api/curation/stage2/score", {
+        const res = await api("/admin/api/curation/stage2/score", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ run_id }),
         });
+        const data = await res.json();
+        applyRunCostSnapshot(data);
+        setStepMeta(2, [
+          `stage2 cost: ${formatUsd(data.stage_cost_usd)}`,
+          `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
+          `llm eval: ${formatInt(data.llm_eval_count || 0)}`,
+          `scored: ${formatInt(data.scored || 0)}`,
+        ]);
         await reloadCandidates();
         setStatus("stage2 done");
+        await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
       }
@@ -381,13 +569,21 @@
       try {
         const run_id = parseRunId();
         setStatus("stage3 summarizing...");
-        await api("/admin/api/curation/stage3/summarize", {
+        const res = await api("/admin/api/curation/stage3/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ run_id, force: false }),
         });
+        const data = await res.json();
+        applyRunCostSnapshot(data);
+        setStepMeta(3, [
+          `stage3 cost: ${formatUsd(data.stage_cost_usd)}`,
+          `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
+          `updated: ${formatInt(data.updated || 0)}`,
+        ]);
         await reloadCandidates();
         setStatus("stage3 done");
+        await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
       }
@@ -425,6 +621,10 @@
           i += 1;
         }
         document.getElementById("preview").textContent = out.join("\n");
+        setStepMeta(4, [
+          "preview only (no LLM call)",
+          `items: ${formatInt((data.items || []).length)}`,
+        ]);
         setStatus("preview ready");
       } catch (e) {
         setStatus(String(e));
@@ -435,12 +635,20 @@
       try {
         const run_id = parseRunId();
         setStatus("publishing...");
-        await api("/admin/api/curation/publish", {
+        const res = await api("/admin/api/curation/publish", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ run_id, publish_mode: "manual" }),
         });
+        const data = await res.json();
+        applyRunCostSnapshot(data);
+        setStepMeta(5, [
+          `publish cost: ${formatUsd(data.stage_cost_usd)}`,
+          `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
+          `published items: ${formatInt(data.item_count || 0)}`,
+        ]);
         setStatus("publish done");
+        await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
       }
@@ -555,12 +763,20 @@
 
     async function regenOne(id) {
       const run_id = parseRunId();
-      await api("/admin/api/curation/stage3/summarize", {
+      const res = await api("/admin/api/curation/stage3/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id, candidate_id: id, force: true }),
       });
+      const data = await res.json();
+      applyRunCostSnapshot(data);
+      setStepMeta(3, [
+        `stage3 cost: ${formatUsd(data.stage_cost_usd)}`,
+        `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
+        `updated: ${formatInt(data.updated || 0)} (single regen)`,
+      ]);
       await reloadCandidates();
+      await refreshCostStats();
     }
 
     async function removeOne(id) {
@@ -603,6 +819,7 @@
 
     async function init() {
       await loadConfig();
+      await refreshCostStats();
       setStatus("ready");
     }
 

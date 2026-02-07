@@ -1034,6 +1034,10 @@ def create_candidate_list_once(
         "status": "ok",
         "run_id": run_id,
         "candidates": len(posts),
+        "stage_input_tokens": 0,
+        "stage_output_tokens": 0,
+        "stage_cost_usd": 0.0,
+        **_run_cost_snapshot(conn, run_id),
         "debug": {
             "hours": hours_i,
             "root_total": root_total,
@@ -1192,7 +1196,16 @@ def score_candidates_once(
         f"[curation] stage2 score run_id={run_id} count={len(scored)} llm_eval={llm_eval_count} "
         f"spend_usd={float(round(total_cost, 6))}"
     )
-    return {"status": "ok", "run_id": run_id, "scored": len(scored)}
+    return {
+        "status": "ok",
+        "run_id": run_id,
+        "scored": len(scored),
+        "llm_eval_count": int(llm_eval_count),
+        "stage_input_tokens": int(total_in),
+        "stage_output_tokens": int(total_out),
+        "stage_cost_usd": float(round(total_cost, 8)),
+        **_run_cost_snapshot(conn, run_id),
+    }
 
 
 def summarize_candidates_once(
@@ -1307,7 +1320,15 @@ def summarize_candidates_once(
         f"[curation] stage3 summarize run_id={run_id} updated={updated} "
         f"tokens=({total_in},{total_out}) spend_usd={float(round(total_cost, 6))}"
     )
-    return {"status": "ok", "run_id": run_id, "updated": updated}
+    return {
+        "status": "ok",
+        "run_id": run_id,
+        "updated": updated,
+        "stage_input_tokens": int(total_in),
+        "stage_output_tokens": int(total_out),
+        "stage_cost_usd": float(round(total_cost, 8)),
+        **_run_cost_snapshot(conn, run_id),
+    }
 
 
 def preview_run(conn, *, run_id: int, limit: int = 10) -> Dict[str, Any]:
@@ -1448,6 +1469,36 @@ def _latest_ready_run(conn) -> Optional[int]:
 
 def latest_ready_run(conn) -> Optional[int]:
     return _latest_ready_run(conn)
+
+
+def _run_cost_snapshot(conn, run_id: int) -> Dict[str, Any]:
+    row = conn.execute(
+        "SELECT run_date_kst, llm_input_tokens, llm_output_tokens, llm_spend_usd, budget_over_target, budget_note "
+        "FROM curation_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    if not row:
+        return {
+            "run_total_input_tokens": 0,
+            "run_total_output_tokens": 0,
+            "run_total_spend_usd": 0.0,
+            "day_total_spend_usd": 0.0,
+            "budget_over_target": False,
+            "budget_note": None,
+        }
+    run_date = row[0]
+    day_total = conn.execute(
+        "SELECT COALESCE(SUM(llm_spend_usd), 0) FROM curation_runs WHERE run_date_kst = ?",
+        (run_date,),
+    ).fetchone()[0]
+    return {
+        "run_total_input_tokens": int(row[1] or 0),
+        "run_total_output_tokens": int(row[2] or 0),
+        "run_total_spend_usd": float(row[3] or 0.0),
+        "day_total_spend_usd": float(day_total or 0.0),
+        "budget_over_target": bool(row[4]),
+        "budget_note": row[5],
+    }
 
 
 def list_runs(conn, limit: int = 30) -> List[Dict[str, Any]]:
@@ -1721,7 +1772,14 @@ def publish_run(
             f"[curation] published run_id={run_id} mode={publish_mode} items={len(selected_rows)} "
             f"summary_cost_usd={float(round(total_cost, 6))}"
         )
-    return {"publication_id": publication_id, "item_count": len(selected_rows)}
+    return {
+        "publication_id": publication_id,
+        "item_count": len(selected_rows),
+        "stage_input_tokens": int(total_in),
+        "stage_output_tokens": int(total_out),
+        "stage_cost_usd": float(round(total_cost, 8)),
+        **_run_cost_snapshot(conn, run_id),
+    }
 
 
 def maybe_auto_publish_due(conn, logger: Optional[Callable[[str], None]] = None) -> Optional[Dict[str, Any]]:
@@ -1973,6 +2031,10 @@ def stats(conn, days: int = 30) -> Dict[str, Any]:
         "SELECT COUNT(*), COALESCE(AVG(item_count),0) FROM curation_publications WHERE published_at >= ?",
         ((_kst_now() - timedelta(days=days)).astimezone(UTC).isoformat(),),
     ).fetchone()
+    all_runs = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(llm_spend_usd),0), COALESCE(SUM(llm_input_tokens),0), COALESCE(SUM(llm_output_tokens),0) "
+        "FROM curation_runs",
+    ).fetchone()
     return {
         "days": days,
         "daily": [
@@ -1990,4 +2052,8 @@ def stats(conn, days: int = 30) -> Dict[str, Any]:
         "avg_posts_per_run": _avg([float(x) for x in posts]) if posts else 0.0,
         "total_publications": int(pubs[0] or 0),
         "avg_items_per_publication": float(pubs[1] or 0.0),
+        "lifetime_run_count": int(all_runs[0] or 0),
+        "lifetime_spend_usd": float(all_runs[1] or 0.0),
+        "lifetime_input_tokens": int(all_runs[2] or 0),
+        "lifetime_output_tokens": int(all_runs[3] or 0),
     }

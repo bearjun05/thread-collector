@@ -571,10 +571,11 @@ def _evaluate_with_llm(
         "scores are 0-100, difficulty is 1-5."
     )
     user_prompt = (
-        f"post_id: {post.get('post_id')}\n"
-        f"username: {post.get('username')}\n"
-        f"created_at: {post.get('created_at')}\n"
-        f"url: {post.get('url')}\n"
+        "metadata:\n"
+        f"- post_id: {post.get('post_id') or ''}\n"
+        f"- username: {post.get('username') or ''}\n"
+        f"- created_at: {post.get('created_at') or ''}\n"
+        f"- url: {post.get('url') or ''}\n\n"
         f"text:\n{post.get('full_text') or ''}\n"
     )
     parsed, in_tok, out_tok = _call_openrouter_json(
@@ -616,8 +617,11 @@ def _summarize_with_llm(
         "- 영어가 포함되어도 한국어 설명 중심으로 작성"
     )
     user_prompt = (
-        f"post_id: {post.get('post_id')}\n"
-        f"url: {post.get('url')}\n"
+        "metadata:\n"
+        f"- post_id: {post.get('post_id') or ''}\n"
+        f"- username: {post.get('username') or ''}\n"
+        f"- created_at: {post.get('created_at') or ''}\n"
+        f"- url: {post.get('url') or ''}\n\n"
         f"text:\n{post.get('full_text') or ''}\n"
     )
     parsed, in_tok, out_tok = _call_openrouter_json(
@@ -1077,7 +1081,8 @@ def score_candidates_once(
     llm_eval_count = 0
     scored: List[Tuple[int, float]] = []
 
-    for r in rows:
+    total_rows = len(rows)
+    for i, r in enumerate(rows, start=1):
         cand_id = int(r[0])
         post_id = r[1]
         full_text = r[6] or ""
@@ -1160,6 +1165,12 @@ def score_candidates_once(
             ),
         )
         scored.append((cand_id, float(llm_total)))
+        if i % 2 == 0 or i == total_rows:
+            conn.commit()
+            log(
+                f"[curation] stage2 progress run_id={run_id} scored={i}/{total_rows} "
+                f"llm_eval={llm_eval_count} spend_usd={float(round(total_cost, 6))}"
+            )
 
     scored.sort(key=lambda x: x[1], reverse=True)
     for idx, (cand_id, _) in enumerate(scored, start=1):
@@ -1238,7 +1249,8 @@ def summarize_candidates_once(
     total_cost = 0.0
     updated = 0
 
-    for r in rows:
+    total_rows = len(rows)
+    for i, r in enumerate(rows, start=1):
         cand = {
             "id": r[0],
             "post_id": r[1],
@@ -1288,6 +1300,12 @@ def summarize_candidates_once(
             (title, summary, cand["id"]),
         )
         updated += 1
+        if i % 2 == 0 or i == total_rows:
+            conn.commit()
+            log(
+                f"[curation] stage3 progress run_id={run_id} updated={updated}/{total_rows} "
+                f"spend_usd={float(round(total_cost, 6))}"
+            )
 
     run_row = conn.execute("SELECT run_date_kst FROM curation_runs WHERE id=?", (run_id,)).fetchone()
     run_date = run_row[0] if run_row else _run_date_kst()
@@ -1529,6 +1547,85 @@ def list_runs(conn, limit: int = 30) -> List[Dict[str, Any]]:
             }
         )
     return out
+
+
+def run_progress(conn, run_id: int) -> Dict[str, Any]:
+    run = conn.execute(
+        "SELECT id, status, started_at, finished_at FROM curation_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    if not run:
+        return {"run_id": run_id, "exists": False}
+
+    total = int(
+        conn.execute("SELECT COUNT(*) FROM curation_candidates WHERE run_id = ?", (run_id,)).fetchone()[0] or 0
+    )
+    scored = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM curation_candidates WHERE run_id = ? AND llm_total_score > 0",
+            (run_id,),
+        ).fetchone()[0]
+        or 0
+    )
+    summarized = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM curation_candidates WHERE run_id = ? "
+            "AND TRIM(COALESCE(generated_title,'')) <> '' AND TRIM(COALESCE(generated_summary,'')) <> ''",
+            (run_id,),
+        ).fetchone()[0]
+        or 0
+    )
+    selected = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM curation_candidates WHERE run_id = ? AND selected_for_publish = 1 AND status != 'rejected'",
+            (run_id,),
+        ).fetchone()[0]
+        or 0
+    )
+    approved = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM curation_candidates WHERE run_id = ? AND status = 'approved'",
+            (run_id,),
+        ).fetchone()[0]
+        or 0
+    )
+    rejected = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM curation_candidates WHERE run_id = ? AND status = 'rejected'",
+            (run_id,),
+        ).fetchone()[0]
+        or 0
+    )
+    pending = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM curation_candidates WHERE run_id = ? AND status = 'pending'",
+            (run_id,),
+        ).fetchone()[0]
+        or 0
+    )
+
+    def _pct(v: int, t: int) -> float:
+        if t <= 0:
+            return 0.0
+        return round((float(v) * 100.0) / float(t), 1)
+
+    return {
+        "run_id": int(run[0]),
+        "exists": True,
+        "status": run[1],
+        "started_at": run[2],
+        "finished_at": run[3],
+        "total_candidates": total,
+        "scored_candidates": scored,
+        "summarized_candidates": summarized,
+        "selected_candidates": selected,
+        "approved_candidates": approved,
+        "pending_candidates": pending,
+        "rejected_candidates": rejected,
+        "score_progress_pct": _pct(scored, total),
+        "summary_progress_pct": _pct(summarized, total),
+        **_run_cost_snapshot(conn, run_id),
+    }
 
 
 def list_candidates(conn, run_id: Optional[int]) -> Dict[str, Any]:

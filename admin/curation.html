@@ -324,6 +324,7 @@
           <label>Run ID <input id="runId" style="width:90px;" /></label>
           <label>Hours <input id="hours" type="number" min="1" max="168" value="24" style="width:90px;" /></label>
           <button class="secondary" onclick="reloadCandidates()">Reload List</button>
+          <button class="secondary" onclick="checkRunStatus()">Check Run Status</button>
           <button class="secondary" onclick="toggleAllDetails(true)">Open All Details</button>
           <button class="secondary" onclick="toggleAllDetails(false)">Close All Details</button>
           <button class="secondary" onclick="saveOrder()">Save Order</button>
@@ -353,6 +354,9 @@
           </div>
         </div>
         <div class="cost-bar">
+          <span id="runState" class="cost-chip">Run state: -</span>
+          <span id="scoreProgress" class="cost-chip">Score: -</span>
+          <span id="summaryProgress" class="cost-chip">Summary: -</span>
           <span id="runCostTotal" class="cost-chip">Run total: -</span>
           <span id="dayCostTotal" class="cost-chip">Day total: -</span>
           <span id="lastDelta" class="cost-chip">Last delta: -</span>
@@ -437,6 +441,7 @@
     let dragSourceId = null;
     let lastCostSnapshot = null;
     const markedForRemove = new Set();
+    let runStatusPollTimer = null;
 
     async function api(path, options = {}) {
       const res = await fetch(path, options);
@@ -474,6 +479,10 @@
 
     function formatInt(v) {
       return Number(v || 0).toLocaleString();
+    }
+
+    function pct(v) {
+      return `${Number(v || 0).toFixed(1)}%`;
     }
 
     function setStepMeta(stepNo, lines) {
@@ -526,6 +535,57 @@
       budgetEl.className = over ? "cost-chip warn" : "cost-chip";
       lastCostSnapshot = current;
       return { delta_run_spend: deltaRun, delta_day_spend: deltaDay };
+    }
+
+    function applyRunStatus(data) {
+      const runStateEl = document.getElementById("runState");
+      const scoreEl = document.getElementById("scoreProgress");
+      const summaryEl = document.getElementById("summaryProgress");
+      if (!data || !data.exists) {
+        runStateEl.textContent = "Run state: not found";
+        scoreEl.textContent = "Score: -";
+        summaryEl.textContent = "Summary: -";
+        runStateEl.className = "cost-chip warn";
+        return;
+      }
+      runStateEl.textContent = `Run state: ${data.status || "-"}`;
+      scoreEl.textContent = `Score: ${formatInt(data.scored_candidates)}/${formatInt(data.total_candidates)} (${pct(data.score_progress_pct)})`;
+      summaryEl.textContent = `Summary: ${formatInt(data.summarized_candidates)}/${formatInt(data.total_candidates)} (${pct(data.summary_progress_pct)})`;
+      runStateEl.className = (data.status || "") === "running" ? "cost-chip warn" : "cost-chip";
+      applyRunCostSnapshot(data);
+    }
+
+    function stopRunStatusPolling() {
+      if (runStatusPollTimer) {
+        clearInterval(runStatusPollTimer);
+        runStatusPollTimer = null;
+      }
+    }
+
+    function startRunStatusPolling(runId) {
+      stopRunStatusPolling();
+      runStatusPollTimer = setInterval(() => {
+        checkRunStatus(runId, true);
+      }, 1500);
+    }
+
+    async function checkRunStatus(runId = null, silent = false) {
+      try {
+        const targetRunId = runId || parseRunId();
+        const res = await api(`/admin/api/curation/run-status?run_id=${targetRunId}`);
+        const data = await res.json();
+        applyRunStatus(data);
+        if (!silent) {
+          setStatus(
+            `run=${targetRunId} status=${data.status || "-"} score=${data.scored_candidates || 0}/${data.total_candidates || 0} summary=${data.summarized_candidates || 0}/${data.total_candidates || 0}`
+          );
+        }
+        if ((data.status || "") !== "running") {
+          stopRunStatusPolling();
+        }
+      } catch (e) {
+        if (!silent) setStatus(`run status failed: ${String(e)}`);
+      }
     }
 
     function compactText(v, n = 120) {
@@ -628,6 +688,7 @@
 
     async function step1List() {
       try {
+        stopRunStatusPolling();
         setStatus("stage1 listing...");
         const hours = Number(document.getElementById("hours").value || 24);
         const res = await api("/admin/api/curation/stage1/list", {
@@ -650,6 +711,7 @@
           `stage1 done (run_id=${data.run_id}, candidates=${data.candidates || 0}, ` +
           `root_total=${d.root_total ?? "-"}, created_win=${d.root_by_created_window ?? "-"}, scraped_win=${d.root_by_scraped_window ?? "-"})`
         );
+        await checkRunStatus(data.run_id, true);
         await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
@@ -657,9 +719,12 @@
     }
 
     async function step2Score() {
+      let run_id = null;
       try {
-        const run_id = parseRunId();
+        run_id = parseRunId();
+        startRunStatusPolling(run_id);
         setStatus("stage2 scoring...");
+        await checkRunStatus(run_id, true);
         const res = await api("/admin/api/curation/stage2/score", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -676,16 +741,22 @@
         ]);
         await reloadCandidates();
         setStatus("stage2 done");
+        await checkRunStatus(run_id, true);
         await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
+      } finally {
+        stopRunStatusPolling();
       }
     }
 
     async function step3Summarize() {
+      let run_id = null;
       try {
-        const run_id = parseRunId();
+        run_id = parseRunId();
+        startRunStatusPolling(run_id);
         setStatus("stage3 summarizing...");
+        await checkRunStatus(run_id, true);
         const res = await api("/admin/api/curation/stage3/summarize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -701,9 +772,12 @@
         ]);
         await reloadCandidates();
         setStatus("stage3 done");
+        await checkRunStatus(run_id, true);
         await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
+      } finally {
+        stopRunStatusPolling();
       }
     }
 
@@ -752,6 +826,7 @@
 
     async function step5Publish() {
       try {
+        stopRunStatusPolling();
         const run_id = parseRunId();
         setStatus("publishing...");
         const res = await api("/admin/api/curation/publish", {
@@ -768,6 +843,7 @@
           `published items: ${formatInt(data.item_count || 0)}`,
         ]);
         setStatus("publish done");
+        await checkRunStatus(run_id, true);
         await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
@@ -984,6 +1060,10 @@
     async function init() {
       await loadConfig();
       await refreshCostStats();
+      try {
+        const maybeRunId = Number(document.getElementById("runId").value || 0);
+        if (maybeRunId) await checkRunStatus(maybeRunId, true);
+      } catch (_) {}
       setStatus("ready");
     }
 

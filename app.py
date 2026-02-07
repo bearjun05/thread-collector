@@ -67,6 +67,7 @@ from curation import (
     refresh_cache as curation_refresh_cache,
     get_cached_feed as curation_get_cached_feed,
     stats as curation_stats,
+    run_progress as curation_run_progress,
     ITEM_FEED as CURATED_ITEM_FEED,
     DIGEST_FEED as CURATED_DIGEST_FEED,
 )
@@ -2195,6 +2196,19 @@ def admin_list_curation_runs(
     conn = _get_db_conn()
     try:
         return {"runs": curation_list_runs(conn, limit=limit)}
+    finally:
+        conn.close()
+
+
+@app.get("/admin/api/curation/run-status")
+def admin_curation_run_status(
+    run_id: int,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        return curation_run_progress(conn, run_id)
     finally:
         conn.close()
 

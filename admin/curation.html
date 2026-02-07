@@ -226,7 +226,11 @@
         const data = await res.json();
         setRunId(data.run_id);
         await reloadCandidates();
-        setStatus(`stage1 done (run_id=${data.run_id}, candidates=${data.candidates || 0})`);
+        const d = data.debug || {};
+        setStatus(
+          `stage1 done (run_id=${data.run_id}, candidates=${data.candidates || 0}, ` +
+          `root_total=${d.root_total ?? "-"}, created_win=${d.root_by_created_window ?? "-"}, scraped_win=${d.root_by_scraped_window ?? "-"})`
+        );
       } catch (e) {
         setStatus(String(e));
       }

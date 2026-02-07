@@ -7,6 +7,7 @@ it without circular dependencies.
 import json
 import hashlib
 import os
+import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -1977,21 +1978,66 @@ def _digest_body(items: List[Dict[str, Any]]) -> str:
     for index, it in enumerate(items):
         kst = _to_kst(_parse_dt(it.get("created_at")))
         dt_text = kst.strftime("%m.%d %H:%M (KST)") if kst else ""
-        title = xml_escape(it.get("title") or "")
-        summary = xml_escape(it.get("summary") or "")
+        position = int(it.get("position") or (index + 1))
+        title_raw = str(it.get("title") or "").strip()
+        summary_raw = _strip_digest_summary_heading(str(it.get("summary") or "").strip(), title_raw, position)
+        title = xml_escape(title_raw)
+        summary = xml_escape(summary_raw)
         url = xml_escape(it.get("url") or "")
         image_url = (it.get("image_url") or "").strip()
         if index > 0:
             parts.append("<hr style=\"border:0;border-top:1px solid #eee7db;margin:10px 0;opacity:0.7;\" />")
-        item_parts = [f"<p>{it.get('position')}. \"{title}\"</p>"]
+        item_parts = [f"<p>{position}. \"{title}\"</p>"]
         if image_url:
             item_parts.append(f"<img src=\"{xml_escape(image_url)}\" />")
-        item_parts.append(f"<p>{summary}</p>")
+        if summary:
+            item_parts.append(f"<p>{summary}</p>")
         item_parts.append(f"<p><a href=\"{url}\">{url}</a></p>")
         if dt_text:
             item_parts.append(f"<p>{xml_escape(dt_text)}</p>")
         parts.append("".join(item_parts))
     return "".join(parts)
+
+
+def _normalize_digest_line(value: str) -> str:
+    text = str(value or "").strip()
+    text = text.replace("“", "\"").replace("”", "\"").replace("’", "'")
+    text = text.strip("\"'")
+    text = " ".join(text.split())
+    return text
+
+
+def _strip_digest_summary_heading(summary: str, title: str, position: int) -> str:
+    lines = [ln.strip() for ln in str(summary or "").splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    if not lines:
+        return ""
+
+    title_norm = _normalize_digest_line(title)
+    if not title_norm:
+        return " ".join(" ".join(lines).split())
+
+    pattern = re.compile(rf"^\s*{max(1, int(position))}\s*[\.\)]\s*")
+    removed = False
+    while lines:
+        first = lines[0]
+        first_norm = _normalize_digest_line(first)
+        first_wo_num = _normalize_digest_line(pattern.sub("", first))
+        if first_norm == title_norm or first_wo_num == title_norm:
+            lines.pop(0)
+            removed = True
+            while lines and not lines[0]:
+                lines.pop(0)
+            continue
+        break
+
+    cleaned = " ".join(" ".join(lines).split()).strip()
+    if cleaned:
+        return cleaned
+    if removed:
+        return ""
+    return " ".join(" ".join([ln for ln in str(summary or "").splitlines() if ln.strip()]).split()).strip()
 
 
 def _digest_media_urls(items: List[Dict[str, Any]]) -> List[str]:

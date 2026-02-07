@@ -811,6 +811,36 @@
       el.textContent = message;
     }
 
+    async function verifyDigestPropagation(expectedDigestEtag) {
+      const digestLink = document.getElementById("rssDigestLink");
+      const href = digestLink ? digestLink.getAttribute("href") : null;
+      if (!href) {
+        return { ok: false, reason: "digest link unavailable" };
+      }
+      const u = new URL(href, window.location.origin);
+      u.searchParams.set("_ts", String(Date.now()));
+      const res = await fetch(u.toString(), {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" },
+      });
+      if (!res.ok) {
+        return { ok: false, reason: `digest http ${res.status}` };
+      }
+      const servedEtag = (res.headers.get("etag") || "").trim();
+      if (expectedDigestEtag && servedEtag && expectedDigestEtag !== servedEtag) {
+        return {
+          ok: false,
+          reason: `etag mismatch expected=${expectedDigestEtag.slice(0, 10)} served=${servedEtag.slice(0, 10)}`
+        };
+      }
+      const xml = await res.text();
+      const legacyDup = /<content:encoded><!\[CDATA\[<p>"[^<]*<\/p><p>1\.\s*"/.test(xml);
+      if (legacyDup) {
+        return { ok: false, reason: "legacy digest body detected" };
+      }
+      return { ok: true, reason: "verified" };
+    }
+
     async function refreshPublishedView(forceCacheRefresh) {
       setRefreshButtonsLoading(true);
       setPublishedRefreshState(
@@ -818,15 +848,31 @@
         forceCacheRefresh ? "refreshing cache..." : "loading view..."
       );
       try {
+        let expectedDigestEtag = "";
         if (forceCacheRefresh) {
-          await api("/admin/api/curation/cache/refresh", {
+          const refreshRes = await api("/admin/api/curation/cache/refresh", {
             method: "POST",
             headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
             cache: "no-store",
             body: JSON.stringify({ feed_type: "all", limit: 10 }),
           });
+          const refreshData = await refreshRes.json();
+          expectedDigestEtag = (
+            refreshData &&
+            refreshData.refreshed &&
+            refreshData.refreshed.digest &&
+            refreshData.refreshed.digest.etag
+          ) || "";
         }
         await loadPublishedView();
+        if (forceCacheRefresh) {
+          const verify = await verifyDigestPropagation(expectedDigestEtag);
+          if (!verify.ok) {
+            setPublishedRefreshState("err", "stale");
+            setStatus(`cache refreshed but external digest is stale: ${verify.reason}`);
+            return;
+          }
+        }
         setPublishedRefreshState("ok", `ok ${new Date().toLocaleTimeString()}`);
         setStatus(forceCacheRefresh ? "published cache refreshed and view reloaded" : "published view reloaded");
       } catch (e) {

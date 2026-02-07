@@ -1336,6 +1336,9 @@ def _serve_curated_feed(
             headers["ETag"] = etag
         if last_modified:
             headers["Last-Modified"] = last_modified
+        headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        headers["Pragma"] = "no-cache"
+        headers["Expires"] = "0"
         _log_token_request(conn, token_id, "curated", request, 200)
         return Response(
             content=xml.encode("utf-8"),

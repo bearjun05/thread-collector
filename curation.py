@@ -329,6 +329,7 @@ def _extract_roots_with_replies(
     conn,
     hours: int,
     scraped_since: Optional[datetime] = None,
+    use_scraped_window: bool = False,
 ) -> List[Dict[str, Any]]:
     cutoff = datetime.now(UTC) - timedelta(hours=hours)
     if scraped_since:
@@ -342,6 +343,13 @@ def _extract_roots_with_replies(
             "WHERE p.is_reply = 0 AND p.scraped_at >= ? ORDER BY p.created_at DESC LIMIT 2000",
             (scraped_since.isoformat(),),
         ).fetchall()
+    elif use_scraped_window:
+        roots = conn.execute(
+            "SELECT p.post_id, p.source_id, s.username, p.url, p.text, p.media_json, p.created_at, p.scraped_at "
+            "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
+            "WHERE p.is_reply = 0 AND p.scraped_at >= ? ORDER BY p.created_at DESC LIMIT 2000",
+            (cutoff.isoformat(),),
+        ).fetchall()
     else:
         roots = conn.execute(
             "SELECT p.post_id, p.source_id, s.username, p.url, p.text, p.media_json, p.created_at, p.scraped_at "
@@ -350,9 +358,10 @@ def _extract_roots_with_replies(
         ).fetchall()
     out: List[Dict[str, Any]] = []
     for r in roots:
-        created = _parse_dt(r[6])
-        if created and created < cutoff:
-            continue
+        if not scraped_since and not use_scraped_window:
+            created = _parse_dt(r[6])
+            if created and created < cutoff:
+                continue
         replies = conn.execute(
             "SELECT text, media_json, created_at FROM posts WHERE source_id = ? AND is_reply = 1 AND parent_post_id = ? ORDER BY created_at ASC",
             (r[1], r[0]),
@@ -965,7 +974,32 @@ def create_candidate_list_once(
     conn.commit()
 
     log = logger or (lambda _: None)
-    posts = _extract_roots_with_replies(conn, max(1, int(hours)), scraped_since=scraped_since)
+    hours_i = max(1, int(hours))
+    now_utc = datetime.now(UTC)
+    cutoff_utc = now_utc - timedelta(hours=hours_i)
+    root_total = int(
+        conn.execute("SELECT COUNT(*) FROM posts WHERE is_reply = 0").fetchone()[0] or 0
+    )
+    root_by_created = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM posts WHERE is_reply = 0 AND created_at >= ?",
+            (cutoff_utc.isoformat(),),
+        ).fetchone()[0]
+        or 0
+    )
+    root_by_scraped = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM posts WHERE is_reply = 0 AND scraped_at >= ?",
+            (cutoff_utc.isoformat(),),
+        ).fetchone()[0]
+        or 0
+    )
+    posts = _extract_roots_with_replies(
+        conn,
+        hours_i,
+        scraped_since=scraped_since,
+        use_scraped_window=(scraped_since is None),
+    )
     conn.execute("DELETE FROM curation_candidates WHERE run_id = ?", (run_id,))
     for idx, post in enumerate(posts, start=1):
         full_text = post.get("full_text") or ""
@@ -996,7 +1030,17 @@ def create_candidate_list_once(
     )
     conn.commit()
     log(f"[curation] stage1 list run_id={run_id} candidates={len(posts)}")
-    return {"status": "ok", "run_id": run_id, "candidates": len(posts)}
+    return {
+        "status": "ok",
+        "run_id": run_id,
+        "candidates": len(posts),
+        "debug": {
+            "hours": hours_i,
+            "root_total": root_total,
+            "root_by_created_window": root_by_created,
+            "root_by_scraped_window": root_by_scraped,
+        },
+    }
 
 
 def score_candidates_once(

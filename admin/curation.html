@@ -459,7 +459,8 @@
       <section class="card">
         <h3>Last Published (Live Until Next Publish)</h3>
         <div class="published-head">
-          <button class="secondary" onclick="loadPublishedView()">Refresh Published View</button>
+          <button id="btnRefreshView" class="secondary" onclick="refreshPublishedView(false)">Refresh View</button>
+          <button id="btnRefreshPublished" class="secondary" onclick="refreshPublishedView(true)">Refresh Cache + View</button>
           <span id="publishedMeta" class="muted">not loaded</span>
         </div>
         <div class="row tight" style="margin-bottom:8px;">
@@ -761,9 +762,44 @@
       }
     }
 
+    function setRefreshButtonsLoading(loading) {
+      const btnView = document.getElementById("btnRefreshView");
+      const btnRefresh = document.getElementById("btnRefreshPublished");
+      if (btnView) {
+        btnView.disabled = loading;
+      }
+      if (btnRefresh) {
+        btnRefresh.disabled = loading;
+      }
+    }
+
+    async function refreshPublishedView(forceCacheRefresh) {
+      setRefreshButtonsLoading(true);
+      try {
+        if (forceCacheRefresh) {
+          await api("/admin/api/curation/cache/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+            cache: "no-store",
+            body: JSON.stringify({ feed_type: "all", limit: 10 }),
+          });
+        }
+        await loadPublishedView();
+        setStatus(forceCacheRefresh ? "published cache refreshed and view reloaded" : "published view reloaded");
+      } catch (e) {
+        setStatus(String(e));
+      } finally {
+        setRefreshButtonsLoading(false);
+      }
+    }
+
     async function loadPublishedView() {
       try {
-        const res = await api("/admin/api/curation/publication?item_limit=20");
+        const refreshedAt = new Date().toLocaleString();
+        const res = await api(`/admin/api/curation/publication?item_limit=20&_ts=${Date.now()}`, {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache" },
+        });
         const data = await res.json();
         const pub = data.publication;
         const links = data.rss_links || {};
@@ -789,11 +825,11 @@
         }
 
         if (!pub) {
-          meta.textContent = "no publication yet";
+          meta.textContent = `no publication yet | refreshed_at=${refreshedAt}`;
           list.innerHTML = `<div class="muted">No published curation yet.</div>`;
           return;
         }
-        meta.textContent = `publication_id=${pub.id} run_id=${pub.run_id} mode=${pub.publish_mode} by=${pub.published_by} published_at=${pub.published_at} items=${pub.item_count}`;
+        meta.textContent = `publication_id=${pub.id} run_id=${pub.run_id} mode=${pub.publish_mode} by=${pub.published_by} published_at=${pub.published_at} items=${pub.item_count} refreshed_at=${refreshedAt}`;
 
         for (const it of (pub.items || [])) {
           const item = document.createElement("article");

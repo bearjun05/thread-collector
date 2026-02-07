@@ -41,6 +41,7 @@
       margin-bottom: 16px;
     }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .row.tight { gap: 6px; }
     .steps {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -90,6 +91,14 @@
       background: #fdecec;
       color: #8a2020;
     }
+    .cost-chip.delta-up {
+      background: #feeceb;
+      color: #7f1d1d;
+    }
+    .cost-chip.delta-down {
+      background: #eaf7ef;
+      color: #15503a;
+    }
     .stats-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -124,17 +133,23 @@
     table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
     th, td { border-bottom: 1px solid var(--border); padding: 8px 6px; text-align: left; vertical-align: top; }
     th { color: var(--muted); font-weight: 600; }
-    thead th:nth-child(1) { width: 28px; }
-    thead th:nth-child(2) { width: 44px; }
-    thead th:nth-child(3) { width: 46px; }
-    thead th:nth-child(4) { width: 110px; }
-    thead th:nth-child(5) { width: 92px; }
-    thead th:nth-child(6) { width: 100px; }
-    thead th:nth-child(7) { width: 220px; }
-    thead th:nth-child(8) { width: 340px; }
-    thead th:nth-child(9) { width: 210px; }
+    thead th:nth-child(1) { width: 24px; }
+    thead th:nth-child(2) { width: 42px; }
+    thead th:nth-child(3) { width: 44px; }
+    thead th:nth-child(4) { width: 44px; }
+    thead th:nth-child(5) { width: 105px; }
+    thead th:nth-child(6) { width: 92px; }
+    thead th:nth-child(7) { width: 98px; }
+    thead th:nth-child(8) { width: 220px; }
+    thead th:nth-child(9) { width: 340px; }
+    thead th:nth-child(10) { width: 210px; }
     .w100 { width: 100%; }
     .muted { color: var(--muted); font-size: 12px; }
+    .clickable-link {
+      color: #205a87;
+      text-decoration: none;
+    }
+    .clickable-link:hover { text-decoration: underline; }
     .pill {
       display: inline-block;
       padding: 2px 8px;
@@ -144,6 +159,15 @@
       color: #215a43;
     }
     .drag { cursor: move; color: var(--muted); font-size: 16px; }
+    .row-marked td { background: #fff0ef; }
+    .inline-preview {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      max-height: 34px;
+      overflow: hidden;
+    }
     .detail { background: #fff9ef; }
     .editor-input {
       width: 100%;
@@ -331,6 +355,7 @@
         <div class="cost-bar">
           <span id="runCostTotal" class="cost-chip">Run total: -</span>
           <span id="dayCostTotal" class="cost-chip">Day total: -</span>
+          <span id="lastDelta" class="cost-chip">Last delta: -</span>
           <span id="runTokenTotal" class="cost-chip">Tokens: -</span>
           <span id="budgetState" class="cost-chip">Budget: -</span>
         </div>
@@ -338,12 +363,22 @@
 
       <section class="card">
         <h3>Editor (single list)</h3>
+        <div class="row tight" style="margin-bottom:8px;">
+          <input id="filterText" style="min-width:260px;" placeholder="Filter: author/title/summary/source text" oninput="renderRows()" />
+          <label>Score &lt; <input id="scoreCutoff" type="number" value="70" style="width:84px;" /></label>
+          <button class="secondary" onclick="markLowScore()">Mark Low Score</button>
+          <button class="secondary" onclick="clearRemoveMarks()">Clear Marks</button>
+          <button class="danger" onclick="removeMarked()">Remove Marked</button>
+          <label><input id="onlyMarked" type="checkbox" onchange="renderRows()" /> only marked</label>
+          <span id="removeMeta" class="muted">marked: 0</span>
+        </div>
         <table>
           <thead>
             <tr>
               <th></th>
               <th>#</th>
               <th>Use</th>
+              <th>Del</th>
               <th>Score</th>
               <th>Author</th>
               <th>Image</th>
@@ -400,6 +435,8 @@
     let currentRunId = null;
     let candidates = [];
     let dragSourceId = null;
+    let lastCostSnapshot = null;
+    const markedForRemove = new Set();
 
     async function api(path, options = {}) {
       const res = await fetch(path, options);
@@ -416,7 +453,11 @@
     }
 
     function setRunId(id) {
-      currentRunId = id ? Number(id) : null;
+      const next = id ? Number(id) : null;
+      if (currentRunId && next && currentRunId !== next) {
+        lastCostSnapshot = null;
+      }
+      currentRunId = next;
       document.getElementById("runId").value = currentRunId || "";
     }
 
@@ -441,17 +482,85 @@
       el.textContent = lines.join("\n");
     }
 
+    function signUsd(v) {
+      const n = Number(v || 0);
+      return `${n >= 0 ? "+" : ""}${formatUsd(n)}`;
+    }
+
+    function normalizeSnapshot(data) {
+      if (!data || data.run_total_spend_usd === undefined) return null;
+      return {
+        run_spend: Number(data.run_total_spend_usd || 0),
+        day_spend: Number(data.day_total_spend_usd || 0),
+        input_tokens: Number(data.run_total_input_tokens || 0),
+        output_tokens: Number(data.run_total_output_tokens || 0),
+      };
+    }
+
     function applyRunCostSnapshot(data) {
       if (!data) return;
       if (data.run_total_spend_usd === undefined) return;
+      const current = normalizeSnapshot(data);
+      let deltaRun = Number(data.stage_cost_usd || 0);
+      let deltaDay = Number(data.stage_cost_usd || 0);
+      if (lastCostSnapshot && current) {
+        deltaRun = current.run_spend - lastCostSnapshot.run_spend;
+        deltaDay = current.day_spend - lastCostSnapshot.day_spend;
+      }
       document.getElementById("runCostTotal").textContent = `Run total: ${formatUsd(data.run_total_spend_usd)}`;
       document.getElementById("dayCostTotal").textContent = `Day total: ${formatUsd(data.day_total_spend_usd)}`;
+      const deltaEl = document.getElementById("lastDelta");
+      deltaEl.textContent = `Last delta: run ${signUsd(deltaRun)} / day ${signUsd(deltaDay)}`;
+      if (deltaRun > 0 || deltaDay > 0) {
+        deltaEl.className = "cost-chip delta-up";
+      } else if (deltaRun < 0 || deltaDay < 0) {
+        deltaEl.className = "cost-chip delta-down";
+      } else {
+        deltaEl.className = "cost-chip";
+      }
       document.getElementById("runTokenTotal").textContent =
         `Tokens: in ${formatInt(data.run_total_input_tokens)} / out ${formatInt(data.run_total_output_tokens)}`;
       const budgetEl = document.getElementById("budgetState");
       const over = Boolean(data.budget_over_target);
       budgetEl.textContent = over ? "Budget: over soft target" : "Budget: within soft target";
       budgetEl.className = over ? "cost-chip warn" : "cost-chip";
+      lastCostSnapshot = current;
+      return { delta_run_spend: deltaRun, delta_day_spend: deltaDay };
+    }
+
+    function compactText(v, n = 120) {
+      const one = String(v || "").replace(/\s+/g, " ").trim();
+      if (!one) return "";
+      return one.length > n ? `${one.slice(0, n)}...` : one;
+    }
+
+    function updateRemoveMeta() {
+      const total = candidates.length;
+      const marked = Array.from(markedForRemove).filter(id => candidates.some(c => c.id === id)).length;
+      document.getElementById("removeMeta").textContent = `marked: ${marked} / total: ${total}`;
+    }
+
+    function toggleRemoveMark(id, checked) {
+      if (checked) markedForRemove.add(id);
+      else markedForRemove.delete(id);
+      const row = document.querySelector(`tr[data-id="${id}"]`);
+      if (row) row.classList.toggle("row-marked", checked);
+      updateRemoveMeta();
+    }
+
+    function clearRemoveMarks() {
+      markedForRemove.clear();
+      renderRows();
+    }
+
+    function markLowScore() {
+      const cutoff = Number(document.getElementById("scoreCutoff").value || 70);
+      for (const c of candidates) {
+        if (Number(c.llm_total_score || 0) < cutoff) {
+          markedForRemove.add(c.id);
+        }
+      }
+      renderRows();
     }
 
     async function refreshCostStats() {
@@ -523,9 +632,10 @@
         const data = await res.json();
         setRunId(data.run_id);
         await reloadCandidates();
-        applyRunCostSnapshot(data);
+        const delta = applyRunCostSnapshot(data) || { delta_run_spend: 0, delta_day_spend: 0 };
         setStepMeta(1, [
           `stage1 cost: ${formatUsd(data.stage_cost_usd)}`,
+          `delta: run ${signUsd(delta.delta_run_spend)} / day ${signUsd(delta.delta_day_spend)}`,
           `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
           `candidates: ${formatInt(data.candidates || 0)}`,
         ]);
@@ -550,9 +660,10 @@
           body: JSON.stringify({ run_id }),
         });
         const data = await res.json();
-        applyRunCostSnapshot(data);
+        const delta = applyRunCostSnapshot(data) || { delta_run_spend: 0, delta_day_spend: 0 };
         setStepMeta(2, [
           `stage2 cost: ${formatUsd(data.stage_cost_usd)}`,
+          `delta: run ${signUsd(delta.delta_run_spend)} / day ${signUsd(delta.delta_day_spend)}`,
           `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
           `llm eval: ${formatInt(data.llm_eval_count || 0)}`,
           `scored: ${formatInt(data.scored || 0)}`,
@@ -575,9 +686,10 @@
           body: JSON.stringify({ run_id, force: false }),
         });
         const data = await res.json();
-        applyRunCostSnapshot(data);
+        const delta = applyRunCostSnapshot(data) || { delta_run_spend: 0, delta_day_spend: 0 };
         setStepMeta(3, [
           `stage3 cost: ${formatUsd(data.stage_cost_usd)}`,
+          `delta: run ${signUsd(delta.delta_run_spend)} / day ${signUsd(delta.delta_day_spend)}`,
           `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
           `updated: ${formatInt(data.updated || 0)}`,
         ]);
@@ -641,9 +753,10 @@
           body: JSON.stringify({ run_id, publish_mode: "manual" }),
         });
         const data = await res.json();
-        applyRunCostSnapshot(data);
+        const delta = applyRunCostSnapshot(data) || { delta_run_spend: 0, delta_day_spend: 0 };
         setStepMeta(5, [
           `publish cost: ${formatUsd(data.stage_cost_usd)}`,
+          `delta: run ${signUsd(delta.delta_run_spend)} / day ${signUsd(delta.delta_day_spend)}`,
           `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
           `published items: ${formatInt(data.item_count || 0)}`,
         ]);
@@ -660,7 +773,12 @@
       const data = await res.json();
       setRunId(data.run_id);
       candidates = data.candidates || [];
+      const validIds = new Set(candidates.map(c => c.id));
+      for (const id of Array.from(markedForRemove)) {
+        if (!validIds.has(id)) markedForRemove.delete(id);
+      }
       renderRows();
+      updateRemoveMeta();
     }
 
     function escapeAttr(s) {
@@ -672,14 +790,28 @@
     }
 
     function renderRows() {
-        const tbody = document.getElementById("rows");
-        tbody.innerHTML = "";
+      const tbody = document.getElementById("rows");
+      tbody.innerHTML = "";
+      const q = (document.getElementById("filterText").value || "").toLowerCase().trim();
+      const onlyMarked = Boolean(document.getElementById("onlyMarked").checked);
       for (const c of candidates) {
+        const marked = markedForRemove.has(c.id);
+        if (onlyMarked && !marked) continue;
         const title = c.edited_title || c.generated_title || "";
         const summary = c.edited_summary || c.generated_summary || "";
         const imageUrl = c.edited_image_url || c.representative_image_url || "";
+        const rawPreview = compactText(c.full_text || "", 180);
+        const haystack = [
+          c.username || "",
+          title || "",
+          summary || "",
+          c.full_text || "",
+          c.url || "",
+        ].join(" ").toLowerCase();
+        if (q && !haystack.includes(q)) continue;
         const tr = document.createElement("tr");
         tr.dataset.id = String(c.id);
+        if (marked) tr.classList.add("row-marked");
         tr.draggable = true;
         tr.addEventListener("dragstart", onDragStart);
         tr.addEventListener("dragover", onDragOver);
@@ -688,18 +820,25 @@
           <td class="drag">⋮⋮</td>
           <td>${c.rank_order}</td>
           <td><input type="checkbox" id="sel-${c.id}" ${c.selected_for_publish ? "checked" : ""} /></td>
+          <td><input type="checkbox" id="rm-${c.id}" ${marked ? "checked" : ""} onchange="toggleRemoveMark(${c.id}, this.checked)" /></td>
           <td>
             <strong>${Number(c.llm_total_score || 0).toFixed(2)}</strong>
             <div class="muted">rule ${Number(c.rule_score || 0).toFixed(2)}</div>
             <div class="muted">${Number(c.impact || 0).toFixed(0)}/${Number(c.novelty || 0).toFixed(0)}/${Number(c.utility || 0).toFixed(0)}/${Number(c.accessibility || 0).toFixed(0)}</div>
           </td>
-          <td>@${escapeText(c.username || "")}</td>
+          <td>
+            <div>@${escapeText(c.username || "")}</div>
+            <a class="clickable-link muted" href="${escapeAttr(c.url || "#")}" target="_blank" rel="noopener">open post</a>
+          </td>
           <td>
             <div class="thumb-box">
               ${imageUrl ? `<img src="${escapeAttr(imageUrl)}" alt="representative image" loading="lazy" onerror="this.parentElement.textContent='image fail';" />` : `no image`}
             </div>
           </td>
-          <td><input id="title-${c.id}" class="editor-input" value="${escapeAttr(title)}" /></td>
+          <td>
+            <input id="title-${c.id}" class="editor-input" value="${escapeAttr(title)}" />
+            <div class="inline-preview">${escapeText(rawPreview)}</div>
+          </td>
           <td><textarea id="summary-${c.id}" class="editor-textarea">${escapeText(summary)}</textarea></td>
           <td>
             <div class="row">
@@ -717,7 +856,7 @@
         detail.className = "detail";
         detail.style.display = "none";
         detail.innerHTML = `
-          <td colspan="9">
+          <td colspan="10">
             <div class="detail-wrap">
               <div>
                 <div class="muted">post_id=${escapeText(c.post_id || "")} | created_at=${escapeText(c.created_at || "-")} | url=${escapeText(c.url || "")}</div>
@@ -733,6 +872,7 @@
         `;
         tbody.appendChild(detail);
       }
+      updateRemoveMeta();
     }
 
     function toggleDetail(id) {
@@ -769,9 +909,10 @@
         body: JSON.stringify({ run_id, candidate_id: id, force: true }),
       });
       const data = await res.json();
-      applyRunCostSnapshot(data);
+      const delta = applyRunCostSnapshot(data) || { delta_run_spend: 0, delta_day_spend: 0 };
       setStepMeta(3, [
         `stage3 cost: ${formatUsd(data.stage_cost_usd)}`,
+        `delta: run ${signUsd(delta.delta_run_spend)} / day ${signUsd(delta.delta_day_spend)}`,
         `tokens: in ${formatInt(data.stage_input_tokens)} / out ${formatInt(data.stage_output_tokens)}`,
         `updated: ${formatInt(data.updated || 0)} (single regen)`,
       ]);
@@ -782,7 +923,22 @@
     async function removeOne(id) {
       if (!confirm("Remove this candidate from list?")) return;
       await api(`/admin/api/curation/candidates/${id}`, { method: "DELETE" });
+      markedForRemove.delete(id);
       await reloadCandidates();
+    }
+
+    async function removeMarked() {
+      const ids = candidates.filter(c => markedForRemove.has(c.id)).map(c => c.id);
+      if (!ids.length) {
+        alert("No marked candidates.");
+        return;
+      }
+      if (!confirm(`Remove ${ids.length} marked candidates?`)) return;
+      setStatus(`removing ${ids.length} candidates...`);
+      await Promise.all(ids.map((id) => api(`/admin/api/curation/candidates/${id}`, { method: "DELETE" })));
+      markedForRemove.clear();
+      await reloadCandidates();
+      setStatus(`removed ${ids.length} candidates`);
     }
 
     function onDragStart(e) {

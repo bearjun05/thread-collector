@@ -1341,13 +1341,15 @@ def _digest_body(items: List[Dict[str, Any]]) -> str:
     first = items[0]
     top_line = f'"{xml_escape(first.get("title") or "")}"'
     parts = [f"<p>{top_line}</p>"]
-    for it in items:
+    for index, it in enumerate(items):
         kst = _to_kst(_parse_dt(it.get("created_at")))
         dt_text = kst.strftime("%m.%d %H:%M (KST)") if kst else ""
         title = xml_escape(it.get("title") or "")
         summary = xml_escape(it.get("summary") or "")
         url = xml_escape(it.get("url") or "")
         image_url = (it.get("image_url") or "").strip()
+        if index > 0:
+            parts.append("<hr style=\"border:0;border-top:1px solid #eee7db;margin:10px 0;opacity:0.7;\" />")
         item_parts = [f"<p>{it.get('position')}. \"{title}\"</p>"]
         if image_url:
             item_parts.append(f"<img src=\"{xml_escape(image_url)}\" />")

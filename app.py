@@ -51,6 +51,10 @@ from curation import (
     list_runs as curation_list_runs,
     list_candidates as curation_list_candidates,
     update_candidate as curation_update_candidate,
+    create_candidate_list_once as curation_create_candidate_list_once,
+    score_candidates_once as curation_score_candidates_once,
+    summarize_candidates_once as curation_summarize_candidates_once,
+    preview_run as curation_preview_run,
     approve_all as curation_approve_all,
     reorder_candidates as curation_reorder_candidates,
     publish_run as curation_publish_run,
@@ -695,6 +699,21 @@ class CurationPublishRequest(BaseModel):
 class CurationCacheRefreshRequest(BaseModel):
     feed_type: Literal["all", "item", "digest"] = "all"
     limit: int = Field(10, ge=1, le=100)
+
+
+class CurationStage1Request(BaseModel):
+    hours: int = Field(24, ge=1, le=168)
+    force: bool = True
+
+
+class CurationStageRunRequest(BaseModel):
+    run_id: int
+
+
+class CurationStage3Request(BaseModel):
+    run_id: int
+    candidate_id: Optional[int] = None
+    force: bool = False
 
 
 class BatchScrapeItem(BaseModel):
@@ -2051,6 +2070,59 @@ def admin_run_curation(
         conn.close()
 
 
+@app.post("/admin/api/curation/stage1/list")
+def admin_curation_stage1_list(
+    payload: CurationStage1Request,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        result = curation_create_candidate_list_once(
+            conn,
+            hours=payload.hours,
+            force=payload.force,
+            logger=_append_log,
+        )
+        return {"status": "ok", **result}
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/curation/stage2/score")
+def admin_curation_stage2_score(
+    payload: CurationStageRunRequest,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        result = curation_score_candidates_once(conn, run_id=payload.run_id, logger=_append_log)
+        return {"status": "ok", **result}
+    finally:
+        conn.close()
+
+
+@app.post("/admin/api/curation/stage3/summarize")
+def admin_curation_stage3_summarize(
+    payload: CurationStage3Request,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        result = curation_summarize_candidates_once(
+            conn,
+            run_id=payload.run_id,
+            candidate_id=payload.candidate_id,
+            force=payload.force,
+            logger=_append_log,
+        )
+        return {"status": "ok", **result}
+    finally:
+        conn.close()
+
+
 @app.get("/admin/api/curation/runs")
 def admin_list_curation_runs(
     limit: int = 30,
@@ -2077,6 +2149,20 @@ def admin_list_curation_candidates(
         conn.close()
 
 
+@app.get("/admin/api/curation/preview")
+def admin_curation_preview(
+    run_id: int,
+    limit: int = 10,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        return curation_preview_run(conn, run_id=run_id, limit=limit)
+    finally:
+        conn.close()
+
+
 @app.patch("/admin/api/curation/candidates/{candidate_id}")
 def admin_update_curation_candidate(
     candidate_id: int,
@@ -2088,6 +2174,21 @@ def admin_update_curation_candidate(
     conn = _get_db_conn()
     try:
         curation_update_candidate(conn, candidate_id, updates, reviewed_by=credentials.username)
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.delete("/admin/api/curation/candidates/{candidate_id}")
+def admin_delete_curation_candidate(
+    candidate_id: int,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    conn = _get_db_conn()
+    try:
+        conn.execute("DELETE FROM curation_candidates WHERE id = ?", (candidate_id,))
+        conn.commit()
         return {"status": "ok"}
     finally:
         conn.close()

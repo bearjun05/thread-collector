@@ -927,6 +927,382 @@ def run_curation_once(
         raise
 
 
+def create_candidate_list_once(
+    conn,
+    *,
+    hours: int = 24,
+    force: bool = True,
+    scraped_since: Optional[datetime] = None,
+    logger: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    ensure_schema(conn)
+    run_date = _run_date_kst()
+    started_at = datetime.now(UTC).isoformat()
+    row = conn.execute(
+        "SELECT id, status FROM curation_runs WHERE run_date_kst = ? ORDER BY id DESC LIMIT 1",
+        (run_date,),
+    ).fetchone()
+    if row and not force and row[1] in ("draft", "scored", "ready", "published", "running"):
+        return {"status": "skipped", "reason": "already_exists", "run_id": int(row[0])}
+
+    if row and force:
+        run_id = int(row[0])
+        conn.execute("DELETE FROM curation_publications WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM curation_candidates WHERE run_id = ?", (run_id,))
+        conn.execute(
+            "UPDATE curation_runs SET status='running', started_at=?, finished_at=NULL, "
+            "total_posts=0, rule_pass_count=0, llm_eval_count=0, llm_input_tokens=0, "
+            "llm_output_tokens=0, llm_spend_usd=0.0, budget_over_target=0, budget_note=NULL, error_message=NULL "
+            "WHERE id = ?",
+            (started_at, run_id),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO curation_runs (run_date_kst, status, started_at) VALUES (?, 'running', ?)",
+            (run_date, started_at),
+        )
+        run_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.commit()
+
+    log = logger or (lambda _: None)
+    posts = _extract_roots_with_replies(conn, max(1, int(hours)), scraped_since=scraped_since)
+    conn.execute("DELETE FROM curation_candidates WHERE run_id = ?", (run_id,))
+    for idx, post in enumerate(posts, start=1):
+        full_text = post.get("full_text") or ""
+        conn.execute(
+            "INSERT INTO curation_candidates "
+            "(run_id, post_id, source_id, username, url, created_at, full_text, full_text_hash, representative_image_url, "
+            "rule_score, llm_total_score, impact, novelty, utility, accessibility, difficulty, flags_json, reasons_json, "
+            "recommended_tier, status, rank_order, selected_for_publish) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 1, '[]', '{}', 'pending', 'pending', ?, 1)",
+            (
+                run_id,
+                post.get("post_id"),
+                post.get("source_id"),
+                post.get("username"),
+                post.get("url"),
+                post.get("created_at"),
+                full_text,
+                hashlib.sha256(full_text.encode("utf-8")).hexdigest(),
+                post.get("representative_image_url"),
+                idx,
+            ),
+        )
+    finished_at = datetime.now(UTC).isoformat()
+    conn.execute(
+        "UPDATE curation_runs SET status='draft', finished_at=?, total_posts=?, rule_pass_count=?, llm_eval_count=0, "
+        "llm_input_tokens=0, llm_output_tokens=0, llm_spend_usd=0.0, budget_over_target=0, budget_note=NULL WHERE id=?",
+        (finished_at, len(posts), len(posts), run_id),
+    )
+    conn.commit()
+    log(f"[curation] stage1 list run_id={run_id} candidates={len(posts)}")
+    return {"status": "ok", "run_id": run_id, "candidates": len(posts)}
+
+
+def score_candidates_once(
+    conn,
+    *,
+    run_id: int,
+    logger: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    ensure_schema(conn)
+    cfg = get_config(conn)
+    log = logger or (lambda _: None)
+    now = datetime.now(UTC).isoformat()
+    conn.execute("UPDATE curation_runs SET status='running', started_at=? WHERE id=?", (now, run_id))
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT id, post_id, source_id, username, url, created_at, full_text, representative_image_url "
+        "FROM curation_candidates WHERE run_id = ? ORDER BY rank_order ASC, id ASC",
+        (run_id,),
+    ).fetchall()
+    if not rows:
+        return {"status": "skipped", "reason": "no_candidates", "run_id": run_id}
+
+    api_key = _resolve_openrouter_api_key(cfg)
+    model = str(cfg.get("openrouter_model", "openai/gpt-4o-mini"))
+    prompt_version = str(cfg.get("prompt_version", "v2"))
+    total_in = 0
+    total_out = 0
+    total_cost = 0.0
+    llm_eval_count = 0
+    scored: List[Tuple[int, float]] = []
+
+    for r in rows:
+        cand_id = int(r[0])
+        post_id = r[1]
+        full_text = r[6] or ""
+        post_obj = {
+            "post_id": post_id,
+            "source_id": r[2],
+            "username": r[3],
+            "url": r[4],
+            "created_at": r[5],
+            "full_text": full_text,
+            "reply_texts": [],
+        }
+        rule_eval = _rule_evaluate(post_obj)
+        rule_scores = rule_eval.get("scores") or {}
+        rule_total = _total_score(rule_scores, cfg)
+        full_hash = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
+        cache = _get_llm_cache(
+            conn,
+            post_id=post_id,
+            full_text_hash=full_hash,
+            model=model,
+            prompt_version=prompt_version,
+            task="eval",
+        )
+        eval_data = rule_eval
+        if cache:
+            parsed = cache.get("result") or {}
+            if isinstance(parsed, dict) and parsed.get("scores"):
+                eval_data = parsed
+            total_in += int(cache.get("input_tokens") or 0)
+            total_out += int(cache.get("output_tokens") or 0)
+            total_cost += float(cache.get("cost_usd") or 0.0)
+        else:
+            parsed, in_tok, out_tok, cost = _evaluate_with_llm(post_obj, cfg, api_key=api_key)
+            if parsed and parsed.get("scores"):
+                eval_data = parsed
+                _upsert_llm_cache(
+                    conn,
+                    post_id=post_id,
+                    full_text_hash=full_hash,
+                    model=model,
+                    prompt_version=prompt_version,
+                    task="eval",
+                    result=parsed,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    cost_usd=cost,
+                )
+            total_in += in_tok
+            total_out += out_tok
+            total_cost += cost
+            if parsed:
+                llm_eval_count += 1
+
+        scores = eval_data.get("scores") or {}
+        llm_total = _total_score(scores, cfg)
+        impact = float(scores.get("impact", rule_scores.get("impact", 0)))
+        novelty = float(scores.get("novelty_or_newsworthiness", rule_scores.get("novelty_or_newsworthiness", 0)))
+        utility = float(scores.get("utility", rule_scores.get("utility", 0)))
+        accessibility = float(scores.get("accessibility", rule_scores.get("accessibility", 0)))
+        difficulty = int(scores.get("difficulty", rule_scores.get("difficulty", 1)))
+        flags = eval_data.get("flags", [])
+        reasons = eval_data.get("reasons", {})
+        tier = str(eval_data.get("recommended_tier", "borderline"))
+        conn.execute(
+            "UPDATE curation_candidates SET rule_score=?, llm_total_score=?, impact=?, novelty=?, utility=?, accessibility=?, "
+            "difficulty=?, flags_json=?, reasons_json=?, recommended_tier=? WHERE id=?",
+            (
+                float(rule_total),
+                float(llm_total),
+                impact,
+                novelty,
+                utility,
+                accessibility,
+                difficulty,
+                json.dumps(flags if isinstance(flags, list) else [], ensure_ascii=False),
+                json.dumps(reasons if isinstance(reasons, dict) else {}, ensure_ascii=False),
+                tier,
+                cand_id,
+            ),
+        )
+        scored.append((cand_id, float(llm_total)))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    for idx, (cand_id, _) in enumerate(scored, start=1):
+        conn.execute("UPDATE curation_candidates SET rank_order=? WHERE id=?", (idx, cand_id))
+
+    run_row = conn.execute("SELECT run_date_kst FROM curation_runs WHERE id=?", (run_id,)).fetchone()
+    run_date = run_row[0] if run_row else _run_date_kst()
+    day_spend = conn.execute(
+        "SELECT COALESCE(SUM(llm_spend_usd), 0) FROM curation_runs WHERE run_date_kst = ? AND id != ?",
+        (run_date, run_id),
+    ).fetchone()[0]
+    target = float(cfg.get("target_daily_spend_usd", 1.0))
+    total_spend = float(day_spend) + float(total_cost)
+    over_target = 1 if total_spend > target else 0
+    note = None
+    if over_target:
+        note = f"soft target exceeded: target={target:.4f}, actual={total_spend:.4f}"
+    conn.execute(
+        "UPDATE curation_runs SET status='scored', finished_at=?, llm_eval_count=?, llm_input_tokens=?, llm_output_tokens=?, "
+        "llm_spend_usd=?, budget_over_target=?, budget_note=? WHERE id=?",
+        (
+            datetime.now(UTC).isoformat(),
+            int(llm_eval_count),
+            int(total_in),
+            int(total_out),
+            float(round(total_cost, 8)),
+            int(over_target),
+            note,
+            run_id,
+        ),
+    )
+    conn.commit()
+    log(
+        f"[curation] stage2 score run_id={run_id} count={len(scored)} llm_eval={llm_eval_count} "
+        f"spend_usd={float(round(total_cost, 6))}"
+    )
+    return {"status": "ok", "run_id": run_id, "scored": len(scored)}
+
+
+def summarize_candidates_once(
+    conn,
+    *,
+    run_id: int,
+    candidate_id: Optional[int] = None,
+    force: bool = False,
+    logger: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    ensure_schema(conn)
+    cfg = get_config(conn)
+    log = logger or (lambda _: None)
+    rows = conn.execute(
+        "SELECT id, post_id, username, url, created_at, full_text, representative_image_url, "
+        "edited_title, edited_summary, edited_image_url, generated_title, generated_summary, status, rank_order, selected_for_publish "
+        "FROM curation_candidates WHERE run_id = ? "
+        + ("AND id = ? " if candidate_id else "")
+        + "ORDER BY rank_order ASC, id ASC",
+        ((run_id, candidate_id) if candidate_id else (run_id,)),
+    ).fetchall()
+    if not rows:
+        return {"status": "skipped", "reason": "no_candidates", "run_id": run_id}
+
+    model = str(cfg.get("openrouter_model", "openai/gpt-4o-mini"))
+    prompt_version = str(cfg.get("prompt_version", "v2"))
+    api_key = _resolve_openrouter_api_key(cfg)
+    total_in = 0
+    total_out = 0
+    total_cost = 0.0
+    updated = 0
+
+    for r in rows:
+        cand = {
+            "id": r[0],
+            "post_id": r[1],
+            "username": r[2],
+            "url": r[3],
+            "created_at": r[4],
+            "full_text": r[5] or "",
+            "representative_image_url": r[6],
+            "edited_title": r[7],
+            "edited_summary": r[8],
+            "edited_image_url": r[9],
+            "generated_title": r[10],
+            "generated_summary": r[11],
+        }
+        if force:
+            post_obj = {"post_id": cand["post_id"], "url": cand["url"], "full_text": cand["full_text"]}
+            parsed, in_tok, out_tok, cost = _summarize_with_llm(post_obj, cfg, api_key=api_key)
+            title = _fallback_title(cand["full_text"])
+            summary = _fallback_summary(cand["full_text"])
+            if parsed:
+                title = str(parsed.get("title") or "").strip() or title
+                summary = _normalize_summary(str(parsed.get("summary") or "").strip(), cand["full_text"])
+                full_hash = hashlib.sha256(cand["full_text"].encode("utf-8")).hexdigest()
+                _upsert_llm_cache(
+                    conn,
+                    post_id=cand["post_id"],
+                    full_text_hash=full_hash,
+                    model=model,
+                    prompt_version=prompt_version,
+                    task="summary",
+                    result={"title": title, "summary": summary},
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    cost_usd=cost,
+                )
+            total_in += in_tok
+            total_out += out_tok
+            total_cost += cost
+        else:
+            title, summary, in_tok, out_tok, cost = _resolve_summary_for_candidate(conn, cand, cfg)
+            total_in += in_tok
+            total_out += out_tok
+            total_cost += cost
+
+        conn.execute(
+            "UPDATE curation_candidates SET generated_title=?, generated_summary=? WHERE id=?",
+            (title, summary, cand["id"]),
+        )
+        updated += 1
+
+    run_row = conn.execute("SELECT run_date_kst FROM curation_runs WHERE id=?", (run_id,)).fetchone()
+    run_date = run_row[0] if run_row else _run_date_kst()
+    day_spend = conn.execute(
+        "SELECT COALESCE(SUM(llm_spend_usd), 0) FROM curation_runs WHERE run_date_kst = ? AND id != ?",
+        (run_date, run_id),
+    ).fetchone()[0]
+    run_prev = conn.execute("SELECT COALESCE(llm_spend_usd,0) FROM curation_runs WHERE id=?", (run_id,)).fetchone()[0]
+    target = float(cfg.get("target_daily_spend_usd", 1.0))
+    total_spend = float(day_spend) + float(run_prev) + float(total_cost)
+    over_target = 1 if total_spend > target else 0
+    note = None
+    if over_target:
+        note = f"soft target exceeded: target={target:.4f}, actual={total_spend:.4f}"
+    conn.execute(
+        "UPDATE curation_runs SET status='ready', finished_at=?, llm_input_tokens=llm_input_tokens+?, "
+        "llm_output_tokens=llm_output_tokens+?, llm_spend_usd=llm_spend_usd+?, budget_over_target=?, budget_note=? WHERE id=?",
+        (
+            datetime.now(UTC).isoformat(),
+            int(total_in),
+            int(total_out),
+            float(round(total_cost, 8)),
+            int(over_target),
+            note,
+            run_id,
+        ),
+    )
+    conn.commit()
+    log(
+        f"[curation] stage3 summarize run_id={run_id} updated={updated} "
+        f"tokens=({total_in},{total_out}) spend_usd={float(round(total_cost, 6))}"
+    )
+    return {"status": "ok", "run_id": run_id, "updated": updated}
+
+
+def preview_run(conn, *, run_id: int, limit: int = 10) -> Dict[str, Any]:
+    rows = conn.execute(
+        "SELECT id, post_id, username, url, created_at, representative_image_url, edited_image_url, "
+        "edited_title, edited_summary, generated_title, generated_summary, full_text, "
+        "llm_total_score, rule_score, rank_order, status, selected_for_publish "
+        "FROM curation_candidates WHERE run_id = ? ORDER BY rank_order ASC, id ASC",
+        (run_id,),
+    ).fetchall()
+    items = []
+    for r in rows:
+        if not bool(r[16]):
+            continue
+        if (r[15] or "") == "rejected":
+            continue
+        title = (r[7] or "").strip() or (r[9] or "").strip() or _fallback_title(r[11] or "")
+        summary = (r[8] or "").strip() or (r[10] or "").strip() or _fallback_summary(r[11] or "")
+        image_url = (r[6] or "").strip() or (r[5] or "").strip() or None
+        items.append(
+            {
+                "id": r[0],
+                "post_id": r[1],
+                "username": r[2],
+                "url": r[3],
+                "created_at": r[4],
+                "title": title,
+                "summary": summary,
+                "image_url": image_url,
+                "llm_total_score": float(r[12] or 0),
+                "rule_score": float(r[13] or 0),
+                "rank_order": int(r[14] or 0),
+            }
+        )
+        if len(items) >= max(1, min(100, limit)):
+            break
+    return {"run_id": run_id, "items": items}
+
+
 def _fallback_title(text: str) -> str:
     one = (text or "").strip().split("\n")[0]
     if not one:
@@ -1021,7 +1397,7 @@ def _resolve_summary_for_candidate(conn, cand: Dict[str, Any], cfg: Dict[str, An
 
 def _latest_ready_run(conn) -> Optional[int]:
     row = conn.execute(
-        "SELECT id FROM curation_runs WHERE status IN ('ready','published') ORDER BY id DESC LIMIT 1"
+        "SELECT id FROM curation_runs WHERE status IN ('draft','scored','ready','published') ORDER BY id DESC LIMIT 1"
     ).fetchone()
     return int(row[0]) if row else None
 
@@ -1068,7 +1444,7 @@ def list_candidates(conn, run_id: Optional[int]) -> Dict[str, Any]:
     rows = conn.execute(
         "SELECT id, post_id, username, url, created_at, representative_image_url, rule_score, llm_total_score, "
         "impact, novelty, utility, accessibility, difficulty, flags_json, reasons_json, recommended_tier, status, "
-        "rank_order, generated_title, generated_summary, edited_title, edited_summary, edited_image_url, selected_for_publish "
+        "rank_order, generated_title, generated_summary, edited_title, edited_summary, edited_image_url, selected_for_publish, full_text "
         "FROM curation_candidates WHERE run_id = ? ORDER BY rank_order ASC, id ASC",
         (run_id,),
     ).fetchall()
@@ -1100,6 +1476,7 @@ def list_candidates(conn, run_id: Optional[int]) -> Dict[str, Any]:
                 "edited_summary": r[21],
                 "edited_image_url": r[22],
                 "selected_for_publish": bool(r[23]),
+                "full_text": r[24] or "",
             }
         )
     return {"run_id": run_id, "candidates": out}

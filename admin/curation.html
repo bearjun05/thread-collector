@@ -291,6 +291,51 @@
       background: #eadfc7;
       margin: 8px 0;
     }
+    .published-head {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .published-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .published-item {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fffef9;
+      padding: 10px;
+    }
+    .published-item .meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .published-item .title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .published-item .summary {
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin-bottom: 8px;
+    }
+    .published-item img {
+      width: 100%;
+      max-width: 520px;
+      height: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #f3ebda;
+      margin-bottom: 8px;
+      display: block;
+    }
     pre {
       background: #111;
       color: #e8e8e8;
@@ -410,6 +455,18 @@
         <h3>Preview</h3>
         <div id="previewCards" class="preview-cards"></div>
         <pre id="preview">(Run 4) Preview 버튼을 누르세요.</pre>
+      </section>
+      <section class="card">
+        <h3>Last Published (Live Until Next Publish)</h3>
+        <div class="published-head">
+          <button class="secondary" onclick="loadPublishedView()">Refresh Published View</button>
+          <span id="publishedMeta" class="muted">not loaded</span>
+        </div>
+        <div class="row tight" style="margin-bottom:8px;">
+          <a id="rssItemLink" class="clickable-link" target="_blank" rel="noopener"></a>
+          <a id="rssDigestLink" class="clickable-link" target="_blank" rel="noopener"></a>
+        </div>
+        <div id="publishedList" class="published-list"></div>
       </section>
       <section class="card">
         <h3>Total Cost (Curation)</h3>
@@ -704,6 +761,58 @@
       }
     }
 
+    async function loadPublishedView() {
+      try {
+        const res = await api("/admin/api/curation/publication?item_limit=20");
+        const data = await res.json();
+        const pub = data.publication;
+        const links = data.rss_links || {};
+        const itemLink = document.getElementById("rssItemLink");
+        const digestLink = document.getElementById("rssDigestLink");
+        const meta = document.getElementById("publishedMeta");
+        const list = document.getElementById("publishedList");
+        list.innerHTML = "";
+
+        if (links.item_url) {
+          itemLink.textContent = `RSS Item Feed: ${links.item_url}`;
+          itemLink.href = links.item_url;
+        } else {
+          itemLink.textContent = `RSS Item Feed: token required (${links.item_url_no_token || "/v2/rss/curated"})`;
+          itemLink.removeAttribute("href");
+        }
+        if (links.digest_url) {
+          digestLink.textContent = `RSS Digest Feed: ${links.digest_url}`;
+          digestLink.href = links.digest_url;
+        } else {
+          digestLink.textContent = `RSS Digest Feed: token required (${links.digest_url_no_token || "/v2/rss/curated/digest"})`;
+          digestLink.removeAttribute("href");
+        }
+
+        if (!pub) {
+          meta.textContent = "no publication yet";
+          list.innerHTML = `<div class="muted">No published curation yet.</div>`;
+          return;
+        }
+        meta.textContent = `publication_id=${pub.id} run_id=${pub.run_id} mode=${pub.publish_mode} by=${pub.published_by} published_at=${pub.published_at} items=${pub.item_count}`;
+
+        for (const it of (pub.items || [])) {
+          const item = document.createElement("article");
+          item.className = "published-item";
+          const imageSrc = it.image_url ? proxiedImageUrl(it.image_url) : "";
+          item.innerHTML = `
+            <div class="meta">#${it.position} | @${escapeText(it.username || "")} | ${escapeText(it.created_at || "-")}</div>
+            <div class="title">${escapeText(it.title || "")}</div>
+            ${imageSrc ? `<img src="${escapeAttr(imageSrc)}" alt="published image" loading="lazy" />` : ""}
+            <div class="summary">${escapeText(it.summary || "")}</div>
+            <a class="clickable-link" href="${escapeAttr(it.url || "#")}" target="_blank" rel="noopener">open source post</a>
+          `;
+          list.appendChild(item);
+        }
+      } catch (e) {
+        document.getElementById("publishedMeta").textContent = `load failed: ${String(e)}`;
+      }
+    }
+
     async function loadConfig() {
       const res = await api("/admin/api/curation/config");
       const cfg = await res.json();
@@ -898,6 +1007,7 @@
         ]);
         setStatus("publish done");
         await checkRunStatus(run_id, true);
+        await loadPublishedView();
         await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
@@ -1114,6 +1224,7 @@
     async function init() {
       await loadConfig();
       await refreshCostStats();
+      await loadPublishedView();
       try {
         const maybeRunId = Number(document.getElementById("runId").value || 0);
         if (maybeRunId) await checkRunStatus(maybeRunId, true);

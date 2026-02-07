@@ -1938,8 +1938,13 @@ def _latest_publication(conn) -> Optional[Dict[str, Any]]:
     }
 
 
-def latest_publication(conn) -> Optional[Dict[str, Any]]:
-    return _latest_publication(conn)
+def latest_publication(conn, item_limit: int = 20) -> Optional[Dict[str, Any]]:
+    pub = _latest_publication(conn)
+    if not pub:
+        return None
+    lim = max(1, min(200, int(item_limit)))
+    pub["items"] = _publication_items(conn, int(pub["id"]), lim)
+    return pub
 
 
 def _publication_items(conn, publication_id: int, limit: int) -> List[Dict[str, Any]]:

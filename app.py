@@ -2359,11 +2359,39 @@ def admin_curation_refresh_cache(
 
 
 @app.get("/admin/api/curation/publication")
-def admin_curation_publication(credentials: HTTPBasicCredentials = Depends(security)):
+def admin_curation_publication(
+    request: Request,
+    item_limit: int = 20,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
     _require_admin(credentials)
     conn = _get_db_conn()
     try:
-        return {"publication": curation_latest_publication(conn)}
+        publication = curation_latest_publication(conn, item_limit=item_limit)
+        base = str(request.base_url).rstrip("/")
+        item_path = "/v2/rss/curated"
+        digest_path = "/v2/rss/curated/digest"
+        token_row = conn.execute(
+            "SELECT token, scope FROM tokens "
+            "WHERE is_active = 1 AND scope IN ('curated', 'global', '*') "
+            "ORDER BY CASE scope WHEN 'curated' THEN 0 WHEN 'global' THEN 1 ELSE 2 END, id DESC LIMIT 1"
+        ).fetchone()
+        links: Dict[str, Any] = {
+            "item_path": item_path,
+            "digest_path": digest_path,
+            "item_url_no_token": f"{base}{item_path}",
+            "digest_url_no_token": f"{base}{digest_path}",
+            "token_scope": token_row[1] if token_row else None,
+            "has_active_token": bool(token_row),
+        }
+        if token_row:
+            token = str(token_row[0])
+            links["item_url"] = f"{base}{item_path}?token={token}"
+            links["digest_url"] = f"{base}{digest_path}?token={token}"
+        else:
+            links["item_url"] = None
+            links["digest_url"] = None
+        return {"publication": publication, "rss_links": links}
     finally:
         conn.close()
 

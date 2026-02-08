@@ -1566,10 +1566,27 @@ def rss_curated_feed(
     return _serve_curated_feed(request, token, CURATED_ITEM_FEED, limit)
 
 
+@app.api_route("/v3/rss/curated/{token}", methods=["GET", "HEAD"])
+def rss_curated_feed_path_token(
+    request: Request,
+    token: str,
+    limit: int = Query(10, ge=1, le=100),
+):
+    return _serve_curated_feed(request, token, CURATED_ITEM_FEED, limit)
+
+
 @app.api_route("/v3/rss/curated/digest", methods=["GET", "HEAD"])
 def rss_curated_digest(
     request: Request,
     token: str = Query(..., description="Curated RSS token (scope=curated/global)"),
+):
+    return _serve_curated_feed(request, token, CURATED_DIGEST_FEED, 10)
+
+
+@app.api_route("/v3/rss/curated/digest/{token}", methods=["GET", "HEAD"])
+def rss_curated_digest_path_token(
+    request: Request,
+    token: str,
 ):
     return _serve_curated_feed(request, token, CURATED_DIGEST_FEED, 10)
 
@@ -1586,8 +1603,10 @@ async def root():
             "POST /v2/scrape": "🧼 새 응답 형식 - 단일 계정 스크래핑",
             "POST /v2/batch-scrape": "🧼 새 응답 형식 - 배치 스크래핑",
             "GET /v2/rss": "🧾 계정별 RSS 피드 (token 필요)",
-            "GET /v3/rss/curated": "🧠 AI 큐레이션 RSS (10개 item)",
-            "GET /v3/rss/curated/digest": "🧠 AI 큐레이션 Digest RSS (1개 item)",
+            "GET /v3/rss/curated": "🧠 AI 큐레이션 RSS (10개 item, query token)",
+            "GET /v3/rss/curated/{token}": "🧠 AI 큐레이션 RSS (10개 item, path token)",
+            "GET /v3/rss/curated/digest": "🧠 AI 큐레이션 Digest RSS (1개 item, query token)",
+            "GET /v3/rss/curated/digest/{token}": "🧠 AI 큐레이션 Digest RSS (1개 item, path token)",
             "GET /admin": "🔐 관리자 UI",
             "GET /admin/curation": "🔐 큐레이션 승인/발행 UI",
             "GET /search-users": "사용자 검색 (자동완성)",
@@ -2678,11 +2697,15 @@ def admin_curation_publication(
         }
         if token_row:
             token = str(token_row[0])
-            links["item_url"] = f"{base}{item_path}?token={token}"
-            links["digest_url"] = f"{base}{digest_path}?token={token}"
+            links["item_url"] = f"{base}{item_path}/{token}"
+            links["digest_url"] = f"{base}{digest_path}/{token}"
+            links["item_url_query"] = f"{base}{item_path}?token={token}"
+            links["digest_url_query"] = f"{base}{digest_path}?token={token}"
         else:
             links["item_url"] = None
             links["digest_url"] = None
+            links["item_url_query"] = None
+            links["digest_url_query"] = None
         return {"publication": publication, "rss_links": links}
     finally:
         conn.close()

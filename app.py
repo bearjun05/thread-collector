@@ -1225,7 +1225,7 @@ async def on_startup():
         _append_log("[scheduler] internal scheduler disabled (ENABLE_INTERNAL_SCHEDULER!=1)")
 
 
-@app.get("/v2/rss")
+@app.api_route("/v2/rss", methods=["GET", "HEAD"])
 def rss_feed(
     request: Request,
     username: str = Query(..., description="Threads username"),
@@ -1539,7 +1539,7 @@ def _serve_curated_feed(
         conn.close()
 
 
-@app.get("/v2/rss/curated")
+@app.api_route("/v2/rss/curated", methods=["GET", "HEAD"])
 def rss_curated_feed(
     request: Request,
     token: str = Query(..., description="Curated RSS token (scope=curated/global)"),
@@ -1548,7 +1548,7 @@ def rss_curated_feed(
     return _serve_curated_feed(request, token, CURATED_ITEM_FEED, limit)
 
 
-@app.get("/v2/rss/curated/digest")
+@app.api_route("/v2/rss/curated/digest", methods=["GET", "HEAD"])
 def rss_curated_digest(
     request: Request,
     token: str = Query(..., description="Curated RSS token (scope=curated/global)"),

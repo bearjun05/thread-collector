@@ -615,7 +615,8 @@ def _summarize_with_llm(
         "- summary: 한국어 3~6문장, 대략 180~420자\n"
         "- 원문 사실 기반으로 작성, 과장/광고 문구 금지\n"
         "- 문장형 본문으로 작성, '요약:' 같은 라벨 금지\n"
-        "- 영어가 포함되어도 한국어 설명 중심으로 작성"
+        "- 영어가 포함되어도 한국어 설명 중심으로 작성\n"
+        "- title/summary 모두 반드시 한국어 문장으로 작성 (고유명사/제품명 제외 영어 문장 금지)"
     )
     user_prompt = (
         "metadata:\n"
@@ -1267,11 +1268,12 @@ def summarize_candidates_once(
         if force:
             post_obj = {"post_id": cand["post_id"], "url": cand["url"], "full_text": cand["full_text"]}
             parsed, in_tok, out_tok, cost = _summarize_with_llm(post_obj, cfg, api_key=api_key)
-            title = _fallback_title(cand["full_text"])
-            summary = _fallback_summary(cand["full_text"])
+            title = _fallback_title_korean(cand["full_text"])
+            summary = _fallback_summary_korean(cand["full_text"])
             if parsed:
                 title = str(parsed.get("title") or "").strip() or title
-                summary = _normalize_summary(str(parsed.get("summary") or "").strip(), cand["full_text"])
+                summary = str(parsed.get("summary") or "").strip() or summary
+                title, summary = _ensure_korean_title_summary(title, summary, cand["full_text"])
                 full_hash = hashlib.sha256(cand["full_text"].encode("utf-8")).hexdigest()
                 _upsert_llm_cache(
                     conn,
@@ -1285,6 +1287,8 @@ def summarize_candidates_once(
                     output_tokens=out_tok,
                     cost_usd=cost,
                 )
+            else:
+                title, summary = _ensure_korean_title_summary(title, summary, cand["full_text"])
             total_in += in_tok
             total_out += out_tok
             total_cost += cost
@@ -1408,6 +1412,41 @@ def _fallback_summary(text: str) -> str:
     return trimmed
 
 
+def _contains_hangul(text: str) -> bool:
+    return bool(re.search(r"[가-힣]", str(text or "")))
+
+
+def _fallback_title_korean(text: str) -> str:
+    title = _fallback_title(text)
+    if _contains_hangul(title):
+        return title
+    return "AI 핵심 업데이트 요약"
+
+
+def _fallback_summary_korean(text: str) -> str:
+    summary = _fallback_summary(text)
+    if _contains_hangul(summary):
+        return summary
+    return (
+        "원문 핵심 내용을 한국어로 요약했습니다. "
+        "세부 맥락과 고유 정보는 원문 링크에서 확인할 수 있습니다."
+    )
+
+
+def _ensure_korean_title_summary(title: str, summary: str, full_text: str) -> Tuple[str, str]:
+    t = str(title or "").strip()
+    s = _normalize_summary(str(summary or "").strip(), full_text)
+    if not t:
+        t = _fallback_title_korean(full_text)
+    if not s:
+        s = _fallback_summary_korean(full_text)
+    if not _contains_hangul(t):
+        t = _fallback_title_korean(full_text)
+    if not _contains_hangul(s):
+        s = _fallback_summary_korean(full_text)
+    return t, s
+
+
 def _normalize_summary(summary: str, full_text: str) -> str:
     s = " ".join((summary or "").split()).strip()
     if s.lower().startswith("summary:"):
@@ -1430,7 +1469,7 @@ def _resolve_summary_for_candidate(conn, cand: Dict[str, Any], cfg: Dict[str, An
 
     generated_title = (cand.get("generated_title") or "").strip()
     generated_summary = (cand.get("generated_summary") or "").strip()
-    if generated_title and generated_summary:
+    if generated_title and generated_summary and _contains_hangul(generated_title) and _contains_hangul(generated_summary):
         return generated_title, generated_summary, 0, 0, 0.0
 
     post = {
@@ -1451,13 +1490,18 @@ def _resolve_summary_for_candidate(conn, cand: Dict[str, Any], cfg: Dict[str, An
     )
     if cache:
         data = cache["result"]
-        title = str(data.get("title") or "").strip() or _fallback_title(post["full_text"])
-        summary = _normalize_summary(str(data.get("summary") or "").strip(), post["full_text"])
-        return title, summary, cache["input_tokens"], cache["output_tokens"], cache["cost_usd"]
+        title = str(data.get("title") or "").strip()
+        summary = str(data.get("summary") or "").strip()
+        title, summary = _ensure_korean_title_summary(title, summary, post["full_text"])
+        if _contains_hangul(title) and _contains_hangul(summary):
+            return title, summary, cache["input_tokens"], cache["output_tokens"], cache["cost_usd"]
 
     api_key = _resolve_openrouter_api_key(cfg)
     parsed, in_tok, out_tok, cost = _summarize_with_llm(post, cfg, api_key=api_key)
     if parsed:
+        title = str(parsed.get("title") or "").strip()
+        summary = str(parsed.get("summary") or "").strip()
+        title, summary = _ensure_korean_title_summary(title, summary, post["full_text"])
         _upsert_llm_cache(
             conn,
             post_id=post["post_id"],
@@ -1465,16 +1509,14 @@ def _resolve_summary_for_candidate(conn, cand: Dict[str, Any], cfg: Dict[str, An
             model=model,
             prompt_version=prompt_version,
             task="summary",
-            result=parsed,
+            result={"title": title, "summary": summary},
             input_tokens=in_tok,
             output_tokens=out_tok,
             cost_usd=cost,
         )
-        title = str(parsed.get("title") or "").strip() or _fallback_title(post["full_text"])
-        summary = _normalize_summary(str(parsed.get("summary") or "").strip(), post["full_text"])
         return title, summary, in_tok, out_tok, cost
 
-    return _fallback_title(post["full_text"]), _fallback_summary(post["full_text"]), 0, 0, 0.0
+    return _fallback_title_korean(post["full_text"]), _fallback_summary_korean(post["full_text"]), 0, 0, 0.0
 
 
 def _latest_ready_run(conn) -> Optional[int]:

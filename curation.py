@@ -753,7 +753,6 @@ def run_curation_once(
     started_at = datetime.now(UTC).isoformat()
     if row and force:
         run_id = int(row[0])
-        conn.execute("DELETE FROM curation_publications WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM curation_candidates WHERE run_id = ?", (run_id,))
         conn.execute(
             "UPDATE curation_runs SET status='running', started_at=?, finished_at=NULL, "
@@ -961,7 +960,6 @@ def create_candidate_list_once(
 
     if row and force:
         run_id = int(row[0])
-        conn.execute("DELETE FROM curation_publications WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM curation_candidates WHERE run_id = ?", (run_id,))
         conn.execute(
             "UPDATE curation_runs SET status='running', started_at=?, finished_at=NULL, "
@@ -1527,11 +1525,77 @@ def list_runs(conn, limit: int = 30) -> List[Dict[str, Any]]:
         "FROM curation_runs ORDER BY id DESC LIMIT ?",
         (max(1, min(200, limit)),),
     ).fetchall()
+    run_ids = [int(r[0]) for r in rows]
+
+    candidate_counts: Dict[int, Dict[str, int]] = {}
+    if run_ids:
+        qmarks = ",".join(["?"] * len(run_ids))
+        cc_rows = conn.execute(
+            f"SELECT run_id, "
+            "COUNT(*) AS total_candidates, "
+            "SUM(CASE WHEN llm_total_score > 0 THEN 1 ELSE 0 END) AS scored_candidates, "
+            "SUM(CASE WHEN TRIM(COALESCE(generated_title,'')) <> '' AND TRIM(COALESCE(generated_summary,'')) <> '' THEN 1 ELSE 0 END) AS summarized_candidates, "
+            "SUM(CASE WHEN selected_for_publish = 1 AND status != 'rejected' THEN 1 ELSE 0 END) AS selected_candidates, "
+            "SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved_candidates, "
+            "SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected_candidates "
+            f"FROM curation_candidates WHERE run_id IN ({qmarks}) GROUP BY run_id",
+            tuple(run_ids),
+        ).fetchall()
+        for c in cc_rows:
+            candidate_counts[int(c[0])] = {
+                "total_candidates": int(c[1] or 0),
+                "scored_candidates": int(c[2] or 0),
+                "summarized_candidates": int(c[3] or 0),
+                "selected_candidates": int(c[4] or 0),
+                "approved_candidates": int(c[5] or 0),
+                "rejected_candidates": int(c[6] or 0),
+            }
+
+    latest_pub_by_run: Dict[int, Dict[str, Any]] = {}
+    if run_ids:
+        qmarks = ",".join(["?"] * len(run_ids))
+        pub_rows = conn.execute(
+            f"SELECT id, run_id, published_at, publish_mode, item_count "
+            f"FROM curation_publications WHERE run_id IN ({qmarks}) ORDER BY id DESC",
+            tuple(run_ids),
+        ).fetchall()
+        for p in pub_rows:
+            run_id = int(p[1])
+            if run_id in latest_pub_by_run:
+                continue
+            latest_pub_by_run[run_id] = {
+                "publication_id": int(p[0]),
+                "published_at": p[2],
+                "publish_mode": p[3],
+                "item_count": int(p[4] or 0),
+            }
+
     out = []
     for r in rows:
+        rid = int(r[0])
+        cc = candidate_counts.get(
+            rid,
+            {
+                "total_candidates": 0,
+                "scored_candidates": 0,
+                "summarized_candidates": 0,
+                "selected_candidates": 0,
+                "approved_candidates": 0,
+                "rejected_candidates": 0,
+            },
+        )
+        pub = latest_pub_by_run.get(
+            rid,
+            {
+                "publication_id": None,
+                "published_at": None,
+                "publish_mode": None,
+                "item_count": 0,
+            },
+        )
         out.append(
             {
-                "id": r[0],
+                "id": rid,
                 "run_date_kst": r[1],
                 "status": r[2],
                 "started_at": r[3],
@@ -1545,6 +1609,8 @@ def list_runs(conn, limit: int = 30) -> List[Dict[str, Any]]:
                 "budget_over_target": bool(r[11]),
                 "budget_note": r[12],
                 "error_message": r[13],
+                **cc,
+                **pub,
             }
         )
     return out
@@ -2007,6 +2073,18 @@ def _normalize_digest_line(value: str) -> str:
     return text
 
 
+def _canonical_digest_heading(value: str) -> str:
+    text = _normalize_digest_line(value)
+    text = re.sub(r"^\s*\d+\s*[\.\)]\s*", "", text)
+    # remove wrapping quotes repeatedly
+    while len(text) >= 2 and text.startswith("\"") and text.endswith("\""):
+        text = text[1:-1].strip()
+    # compare headings without quote noise
+    text = text.replace("\"", "").replace("'", "")
+    text = " ".join(text.split()).strip().lower()
+    return text
+
+
 def _strip_digest_summary_heading(summary: str, title: str, position: int) -> str:
     lines = [ln.strip() for ln in str(summary or "").splitlines()]
     while lines and not lines[0]:
@@ -2015,7 +2093,8 @@ def _strip_digest_summary_heading(summary: str, title: str, position: int) -> st
         return ""
 
     title_norm = _normalize_digest_line(title)
-    if not title_norm:
+    title_canon = _canonical_digest_heading(title)
+    if not title_norm and not title_canon:
         return " ".join(" ".join(lines).split())
 
     pattern = re.compile(rf"^\s*{max(1, int(position))}\s*[\.\)]\s*")
@@ -2024,7 +2103,14 @@ def _strip_digest_summary_heading(summary: str, title: str, position: int) -> st
         first = lines[0]
         first_norm = _normalize_digest_line(first)
         first_wo_num = _normalize_digest_line(pattern.sub("", first))
-        if first_norm == title_norm or first_wo_num == title_norm:
+        first_canon = _canonical_digest_heading(first)
+        first_wo_num_canon = _canonical_digest_heading(first_wo_num)
+        if (
+            first_norm == title_norm
+            or first_wo_num == title_norm
+            or first_canon == title_canon
+            or first_wo_num_canon == title_canon
+        ):
             lines.pop(0)
             removed = True
             while lines and not lines[0]:

@@ -417,6 +417,7 @@
         <div class="row">
           <label>Run ID <input id="runId" style="width:90px;" /></label>
           <label>Hours <input id="hours" type="number" min="1" max="168" value="24" style="width:90px;" /></label>
+          <label>Max Posts <input id="fullRunMaxPosts" type="number" min="1" max="1000" placeholder="optional" style="width:100px;" /></label>
           <button class="secondary" onclick="reloadCandidates()">Reload List</button>
           <button class="secondary" onclick="checkRunStatus()">Check Run Status</button>
           <button class="secondary" onclick="toggleAllDetails(true)">Open All Details</button>
@@ -425,9 +426,13 @@
           <button class="secondary" onclick="refreshCostStats()">Refresh Cost Stats</button>
           <span id="status" class="muted">ready</span>
         </div>
+        <div class="row" style="margin-top:8px;">
+          <button id="btnFullRun" onclick="startFullRun()">0) Full Run (Scrape + Curate + Publish)</button>
+          <span id="stepMeta0" class="muted">full run: idle</span>
+        </div>
         <div class="steps">
           <div class="step">
-            <button onclick="step1List()">1) List Candidates</button>
+            <button id="step1" onclick="step1List()">1) List Candidates</button>
             <div id="stepMeta1" class="step-meta">stage1 cost: -</div>
           </div>
           <div class="step">
@@ -439,11 +444,11 @@
             <div id="stepMeta3" class="step-meta">stage3 cost: -</div>
           </div>
           <div class="step">
-            <button class="secondary" onclick="step4Preview()">4) Preview</button>
+            <button id="step4" class="secondary" onclick="step4Preview()">4) Preview</button>
             <div id="stepMeta4" class="step-meta">preview only (no LLM cost)</div>
           </div>
           <div class="step">
-            <button class="danger" onclick="step5Publish()">5) Publish</button>
+            <button id="step5" class="danger" onclick="step5Publish()">5) Publish</button>
             <div id="stepMeta5" class="step-meta">publish cost: -</div>
           </div>
         </div>
@@ -458,6 +463,15 @@
           <span id="lastDelta" class="cost-chip">Last delta: -</span>
           <span id="runTokenTotal" class="cost-chip">Tokens: -</span>
           <span id="budgetState" class="cost-chip">Budget: -</span>
+        </div>
+      </section>
+      <section class="card">
+        <h3>Run History</h3>
+        <div class="row" style="margin-bottom:8px;">
+          <button class="secondary" onclick="loadRunHistory()">Refresh Runs</button>
+          <select id="runHistorySelect" style="min-width:320px;" onchange="openRunFromHistory(false)"></select>
+          <button class="secondary" onclick="openRunFromHistory(true)">Open Selected Run</button>
+          <span id="runHistoryMeta" class="muted">history not loaded</span>
         </div>
       </section>
 
@@ -555,6 +569,9 @@
     let runStatusPollTimer = null;
     let activeStage = null;
     const liveProgressLines = [];
+    let fullRunPollTimer = null;
+    let fullRunJobId = null;
+    const fullRunSeenSteps = new Set();
 
     async function api(path, options = {}) {
       const res = await fetch(path, options);
@@ -651,14 +668,17 @@
 
     function setStageButtonsBusy(isBusy) {
       const ids = [
-        ["step2", "2) Score"],
-        ["step3", "3) Generate Title/Summary"],
+        ["step1", "1) List Candidates", null],
+        ["step2", "2) Score", "2) Score (running...)"],
+        ["step3", "3) Generate Title/Summary", "3) Generate Title/Summary (running...)"],
+        ["step4", "4) Preview", null],
+        ["step5", "5) Publish", null],
       ];
-      for (const [id, label] of ids) {
+      for (const [id, label, busyLabel] of ids) {
         const btn = document.getElementById(id);
         if (!btn) continue;
         btn.disabled = isBusy;
-        btn.textContent = isBusy ? `${label} (running...)` : label;
+        btn.textContent = isBusy ? (busyLabel || label) : label;
       }
     }
 
@@ -732,8 +752,10 @@
         runStatusPollTimer = null;
       }
       activeStage = null;
-      setLiveStage("idle", false);
-      setStageButtonsBusy(false);
+      if (!fullRunPollTimer) {
+        setLiveStage("idle", false);
+        setStageButtonsBusy(false);
+      }
       appendLiveProgress("polling stopped");
     }
 
@@ -964,6 +986,235 @@
       }
     }
 
+    function setFullRunBusy(isBusy) {
+      const btn = document.getElementById("btnFullRun");
+      if (!btn) return;
+      btn.disabled = isBusy;
+      btn.textContent = isBusy
+        ? "0) Full Run (running...)"
+        : "0) Full Run (Scrape + Curate + Publish)";
+      setStageButtonsBusy(isBusy);
+    }
+
+    function formatRunLabel(run) {
+      const id = Number(run.id || 0);
+      const date = String(run.run_date_kst || "-");
+      const status = String(run.status || "-");
+      const total = Number(run.total_candidates || 0);
+      const scored = Number(run.scored_candidates || 0);
+      const summarized = Number(run.summarized_candidates || 0);
+      const pub = run.publication_id ? `pub#${run.publication_id}` : "pub-";
+      return `#${id} | ${date} | ${status} | score ${scored}/${total} | sum ${summarized}/${total} | ${pub} | ${formatUsd(run.llm_spend_usd || 0)}`;
+    }
+
+    function setRunHistoryMeta(run) {
+      const el = document.getElementById("runHistoryMeta");
+      if (!el) return;
+      if (!run) {
+        el.textContent = "history not loaded";
+        return;
+      }
+      el.textContent =
+        `run=${run.id} date=${run.run_date_kst} status=${run.status} ` +
+        `candidates=${formatInt(run.total_candidates || 0)} scored=${formatInt(run.scored_candidates || 0)} ` +
+        `summarized=${formatInt(run.summarized_candidates || 0)} selected=${formatInt(run.selected_candidates || 0)} ` +
+        `approved=${formatInt(run.approved_candidates || 0)} rejected=${formatInt(run.rejected_candidates || 0)} ` +
+        `spend=${formatUsd(run.llm_spend_usd || 0)} ` +
+        `published=${run.published_at || "-"}`;
+    }
+
+    async function loadRunHistory() {
+      const select = document.getElementById("runHistorySelect");
+      const previousValue = select ? Number(select.value || 0) : 0;
+      const preferred = Number(currentRunId || previousValue || 0);
+      const res = await api("/admin/api/curation/runs?limit=90");
+      const data = await res.json();
+      const runs = Array.isArray(data.runs) ? data.runs : [];
+      if (!select) return runs;
+      select.innerHTML = "";
+      if (!runs.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "no runs";
+        select.appendChild(opt);
+        setRunHistoryMeta(null);
+        return runs;
+      }
+      let selectedRun = null;
+      for (const run of runs) {
+        const opt = document.createElement("option");
+        opt.value = String(run.id);
+        opt.textContent = formatRunLabel(run);
+        select.appendChild(opt);
+        if (!selectedRun && Number(run.id) === preferred) {
+          selectedRun = run;
+        }
+      }
+      if (!selectedRun) selectedRun = runs[0];
+      select.value = String(selectedRun.id);
+      setRunHistoryMeta(selectedRun);
+      return runs;
+    }
+
+    async function openRunFromHistory(verbose = false) {
+      const select = document.getElementById("runHistorySelect");
+      const runId = Number((select && select.value) || 0);
+      if (!runId) return;
+      setRunId(runId);
+      await reloadCandidates();
+      await checkRunStatus(runId, true);
+      const runs = await loadRunHistory();
+      const selected = runs.find(r => Number(r.id) === runId);
+      setRunHistoryMeta(selected || null);
+      if (verbose) {
+        setStatus(`opened run_id=${runId}`);
+      }
+    }
+
+    function stopFullRunPolling() {
+      if (fullRunPollTimer) {
+        clearInterval(fullRunPollTimer);
+        fullRunPollTimer = null;
+      }
+      setFullRunBusy(false);
+    }
+
+    function renderFullRunJob(job) {
+      if (!job || !job.job_id) return;
+      fullRunJobId = String(job.job_id);
+      const status = String(job.status || "-");
+      const stage = String(job.stage || "-");
+      const message = String(job.message || "");
+      const runIdText = job.run_id ? `run_id=${job.run_id}` : "run_id=-";
+      setStepMeta(0, [
+        `status: ${status}`,
+        `stage: ${stage}`,
+        `${runIdText}`,
+        message ? `message: ${message}` : "message: -",
+        `updated: ${job.updated_at || "-"}`,
+      ]);
+      const steps = Array.isArray(job.steps) ? job.steps : [];
+      for (const s of steps) {
+        const key = `${job.job_id}:${s.at}:${s.stage}:${s.status}:${s.message}`;
+        if (fullRunSeenSteps.has(key)) continue;
+        fullRunSeenSteps.add(key);
+        appendLiveProgress(`[full][${s.stage}][${s.status}] ${s.message}`);
+      }
+      const running = status === "queued" || status === "running";
+      setFullRunBusy(running);
+      setLiveStage(running ? `full-run ${stage}` : "idle", running);
+    }
+
+    async function pollFullRunJob(jobId, silent = false) {
+      try {
+        const res = await api(`/admin/api/curation/full-run/${jobId}`);
+        const job = await res.json();
+        renderFullRunJob(job);
+        const status = String(job.status || "");
+        if (status === "queued" || status === "running") return status;
+        stopFullRunPolling();
+        if (job.run_id) {
+          setRunId(Number(job.run_id));
+          await reloadCandidates();
+          await checkRunStatus(Number(job.run_id), true);
+        }
+        await loadRunHistory();
+        if (job.run_id) {
+          const select = document.getElementById("runHistorySelect");
+          if (select) select.value = String(job.run_id);
+        }
+        await loadPublishedView();
+        await refreshCostStats();
+        if (!silent) {
+          setStatus(status === "done"
+            ? `full run done (job_id=${jobId}, run_id=${job.run_id || "-"})`
+            : `full run failed (job_id=${jobId})`);
+        }
+        return status;
+      } catch (e) {
+        stopFullRunPolling();
+        if (!silent) setStatus(`full run status failed: ${String(e)}`);
+        return "failed";
+      }
+    }
+
+    async function startFullRun() {
+      try {
+        const hours = Number(document.getElementById("hours").value || 24);
+        const maxInput = document.getElementById("fullRunMaxPosts");
+        const maxPosts = maxInput ? Number(maxInput.value || 0) : 0;
+        const payload = {
+          hours: Math.max(1, Math.min(168, hours)),
+          force: true,
+          include_scrape: true,
+          all_accounts: true,
+        };
+        if (maxPosts > 0) payload.max_total_posts = Math.max(1, Math.min(1000, maxPosts));
+
+        setFullRunBusy(true);
+        setStatus("starting full run...");
+        appendLiveProgress("full run requested");
+
+        const res = await api("/admin/api/curation/full-run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.status === "already_running") {
+          fullRunJobId = String(data.job_id || "");
+          setStatus(`full run already running (job_id=${fullRunJobId})`);
+          appendLiveProgress(`full run already running job_id=${fullRunJobId}`);
+        } else {
+          fullRunJobId = String(data.job_id || "");
+          fullRunSeenSteps.clear();
+          setStatus(`full run started (job_id=${fullRunJobId})`);
+          appendLiveProgress(`full run started job_id=${fullRunJobId}`);
+        }
+        if (!fullRunJobId) {
+          setStatus("full run start failed: missing job id");
+          stopFullRunPolling();
+          return;
+        }
+        const status = await pollFullRunJob(fullRunJobId, true);
+        if (status === "queued" || status === "running") {
+          if (fullRunPollTimer) {
+            clearInterval(fullRunPollTimer);
+            fullRunPollTimer = null;
+          }
+          fullRunPollTimer = setInterval(() => {
+            pollFullRunJob(fullRunJobId, true);
+          }, 1500);
+        }
+      } catch (e) {
+        stopFullRunPolling();
+        setStatus(`full run failed: ${String(e)}`);
+        appendLiveProgress(`full run failed: ${String(e)}`);
+      }
+    }
+
+    async function restoreLatestFullRun() {
+      try {
+        const res = await api("/admin/api/curation/full-run/latest");
+        const data = await res.json();
+        if (!data || data.status === "empty" || !data.job_id) return;
+        renderFullRunJob(data);
+        const status = String(data.status || "");
+        if (status === "queued" || status === "running") {
+          fullRunJobId = String(data.job_id);
+          if (fullRunPollTimer) {
+            clearInterval(fullRunPollTimer);
+            fullRunPollTimer = null;
+          }
+          setFullRunBusy(true);
+          fullRunPollTimer = setInterval(() => {
+            pollFullRunJob(fullRunJobId, true);
+          }, 1500);
+          appendLiveProgress(`reconnected full run job_id=${fullRunJobId}`);
+        }
+      } catch (_) {}
+    }
+
     async function loadPublishedView() {
       try {
         const refreshedAt = new Date().toLocaleString();
@@ -1085,6 +1336,7 @@
         appendLiveProgress(`stage1 done: candidates=${formatInt(data.candidates || 0)} run_id=${data.run_id}`);
         await checkRunStatus(data.run_id, true);
         await refreshCostStats();
+        await loadRunHistory();
       } catch (e) {
         setStatus(String(e));
         appendLiveProgress(`stage1 failed: ${String(e)}`);
@@ -1118,6 +1370,7 @@
         appendLiveProgress(`stage2 done: scored=${formatInt(data.scored || 0)} llm_eval=${formatInt(data.llm_eval_count || 0)} cost=${formatUsd(data.stage_cost_usd || 0)}`);
         await checkRunStatus(run_id, true);
         await refreshCostStats();
+        await loadRunHistory();
       } catch (e) {
         setStatus(String(e));
         appendLiveProgress(`stage2 failed: ${String(e)}`);
@@ -1152,6 +1405,7 @@
         appendLiveProgress(`stage3 done: updated=${formatInt(data.updated || 0)} cost=${formatUsd(data.stage_cost_usd || 0)}`);
         await checkRunStatus(run_id, true);
         await refreshCostStats();
+        await loadRunHistory();
       } catch (e) {
         setStatus(String(e));
         appendLiveProgress(`stage3 failed: ${String(e)}`);
@@ -1225,6 +1479,7 @@
         await checkRunStatus(run_id, true);
         await loadPublishedView();
         await refreshCostStats();
+        await loadRunHistory();
       } catch (e) {
         setStatus(String(e));
       }
@@ -1371,6 +1626,7 @@
         body: JSON.stringify({ edited_title, edited_summary, selected_for_publish, action: "approved" }),
       });
       await reloadCandidates();
+      await loadRunHistory();
     }
 
     async function regenOne(id) {
@@ -1390,6 +1646,7 @@
       ]);
       await reloadCandidates();
       await refreshCostStats();
+      await loadRunHistory();
     }
 
     async function removeOne(id) {
@@ -1397,6 +1654,7 @@
       await api(`/admin/api/curation/candidates/${id}`, { method: "DELETE" });
       markedForRemove.delete(id);
       await reloadCandidates();
+      await loadRunHistory();
     }
 
     async function removeMarked() {
@@ -1410,6 +1668,7 @@
       await Promise.all(ids.map((id) => api(`/admin/api/curation/candidates/${id}`, { method: "DELETE" })));
       markedForRemove.clear();
       await reloadCandidates();
+      await loadRunHistory();
       setStatus(`removed ${ids.length} candidates`);
     }
 
@@ -1443,18 +1702,24 @@
         body: JSON.stringify({ run_id, ordered_ids }),
       });
       await reloadCandidates();
+      await loadRunHistory();
     }
 
     async function init() {
       await loadConfig();
       await refreshCostStats();
       await loadPublishedView();
+      await loadRunHistory();
+      await restoreLatestFullRun();
       try {
         const initialRunId = await resolveInitialRunId();
         if (initialRunId) {
           setRunId(initialRunId);
           await reloadCandidates();
           await checkRunStatus(initialRunId, true);
+          const select = document.getElementById("runHistorySelect");
+          if (select) select.value = String(initialRunId);
+          await loadRunHistory();
           setStatus(`restored run_id=${initialRunId}`);
         } else {
           setStatus("ready (no run yet)");

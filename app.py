@@ -84,6 +84,10 @@ app = FastAPI(
 
 security = HTTPBasic()
 
+FULL_RUN_JOBS: Dict[str, Dict[str, Any]] = {}
+FULL_RUN_LAST_JOB_ID: Optional[str] = None
+FULL_RUN_MUTEX = asyncio.Lock()
+
 
 def _require_admin(credentials: HTTPBasicCredentials) -> None:
     admin_user = os.environ.get("ADMIN_USER", "admin")
@@ -386,6 +390,170 @@ async def _scheduler_loop() -> None:
         except Exception as e:
             _append_log(f"[scheduler] auto run failed: {type(e).__name__}: {e}")
             continue
+
+
+def _running_full_run_job_id() -> Optional[str]:
+    for jid, job in FULL_RUN_JOBS.items():
+        if job.get("status") in ("queued", "running"):
+            return jid
+    return None
+
+
+def _touch_full_run_job(job_id: str, **kwargs: Any) -> None:
+    job = FULL_RUN_JOBS.get(job_id)
+    if not job:
+        return
+    job.update(kwargs)
+    job["updated_at"] = datetime.now(UTC).isoformat()
+    steps = job.get("steps")
+    if isinstance(steps, list) and len(steps) > 80:
+        job["steps"] = steps[-80:]
+
+
+def _add_full_run_step(job_id: str, stage: str, message: str, status: str = "running") -> None:
+    job = FULL_RUN_JOBS.get(job_id)
+    if not job:
+        return
+    steps = job.setdefault("steps", [])
+    steps.append(
+        {
+            "at": datetime.now(KST).isoformat(),
+            "stage": stage,
+            "status": status,
+            "message": message,
+        }
+    )
+    _touch_full_run_job(job_id)
+
+
+async def _execute_full_run_job(job_id: str, payload: Dict[str, Any], requested_by: str) -> None:
+    global FULL_RUN_LAST_JOB_ID
+    async with FULL_RUN_MUTEX:
+        started = datetime.now(UTC).isoformat()
+        _touch_full_run_job(
+            job_id,
+            status="running",
+            stage="start",
+            message="full run started",
+            started_at=started,
+            requested_by=requested_by,
+        )
+        _add_full_run_step(job_id, "start", "full run started", "ok")
+        run_id: Optional[int] = None
+        try:
+            include_scrape = bool(payload.get("include_scrape", True))
+            all_accounts = bool(payload.get("all_accounts", True))
+            usernames = payload.get("usernames")
+            max_total_posts = payload.get("max_total_posts")
+            hours = int(payload.get("hours", 24))
+            force = bool(payload.get("force", True))
+            scrape_started_at: Optional[datetime] = None
+
+            if include_scrape:
+                scrape_started_at = datetime.now(UTC)
+                _touch_full_run_job(job_id, stage="scrape", message="scraping accounts")
+                _add_full_run_step(job_id, "scrape", "scrape started")
+                await rss_run_once(
+                    None if all_accounts else usernames,
+                    max_total_posts,
+                    trigger_curation=False,
+                )
+                _add_full_run_step(job_id, "scrape", "scrape finished", "ok")
+            else:
+                _add_full_run_step(job_id, "scrape", "scrape skipped (include_scrape=false)", "ok")
+
+            _touch_full_run_job(job_id, stage="stage1", message="building candidates")
+            _add_full_run_step(job_id, "stage1", f"stage1 started (hours={hours}, force={force})")
+            conn = _get_db_conn()
+            try:
+                stage1 = curation_create_candidate_list_once(
+                    conn,
+                    hours=hours,
+                    force=force,
+                    scraped_since=scrape_started_at,
+                    logger=_append_log,
+                )
+            finally:
+                conn.close()
+            run_id = int(stage1.get("run_id") or 0)
+            if not run_id:
+                raise RuntimeError(f"stage1 did not return run_id: {stage1}")
+            _touch_full_run_job(job_id, run_id=run_id)
+            _add_full_run_step(
+                job_id,
+                "stage1",
+                f"stage1 done status={stage1.get('status')} candidates={stage1.get('candidates', '-')}",
+                "ok",
+            )
+
+            _touch_full_run_job(job_id, stage="stage2", message=f"scoring run_id={run_id}")
+            _add_full_run_step(job_id, "stage2", f"stage2 started run_id={run_id}")
+            conn = _get_db_conn()
+            try:
+                stage2 = curation_score_candidates_once(conn, run_id=run_id, logger=_append_log)
+            finally:
+                conn.close()
+            _add_full_run_step(
+                job_id,
+                "stage2",
+                f"stage2 done status={stage2.get('status')} scored={stage2.get('scored', '-')}",
+                "ok",
+            )
+
+            _touch_full_run_job(job_id, stage="stage3", message=f"summarizing run_id={run_id}")
+            _add_full_run_step(job_id, "stage3", f"stage3 started run_id={run_id}")
+            conn = _get_db_conn()
+            try:
+                stage3 = curation_summarize_candidates_once(conn, run_id=run_id, force=False, logger=_append_log)
+            finally:
+                conn.close()
+            _add_full_run_step(
+                job_id,
+                "stage3",
+                f"stage3 done status={stage3.get('status')} updated={stage3.get('updated', '-')}",
+                "ok",
+            )
+
+            _touch_full_run_job(job_id, stage="publish", message=f"publishing run_id={run_id}")
+            _add_full_run_step(job_id, "publish", f"publish started run_id={run_id}")
+            conn = _get_db_conn()
+            try:
+                pub = curation_publish_run(
+                    conn,
+                    run_id,
+                    publish_mode="manual",
+                    published_by=requested_by,
+                    logger=_append_log,
+                )
+                curation_refresh_cache(conn, CURATED_ITEM_FEED, 10)
+                curation_refresh_cache(conn, CURATED_DIGEST_FEED, 10)
+            finally:
+                conn.close()
+            _add_full_run_step(
+                job_id,
+                "publish",
+                f"publish done publication_id={pub.get('publication_id')} item_count={pub.get('item_count')}",
+                "ok",
+            )
+            _touch_full_run_job(
+                job_id,
+                status="done",
+                stage="done",
+                message="full run completed",
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+        except Exception as e:
+            _add_full_run_step(job_id, "failed", f"{type(e).__name__}: {e}", "failed")
+            _touch_full_run_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                message=f"{type(e).__name__}: {e}",
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+            _append_log(f"[curation][full] failed job_id={job_id}: {type(e).__name__}: {e}")
+        finally:
+            FULL_RUN_LAST_JOB_ID = job_id
 
 
 def _collect_youtube_embeds(root_text: str, replies: List[tuple]) -> List[str]:
@@ -788,6 +956,15 @@ class CurationStage3Request(BaseModel):
     run_id: int
     candidate_id: Optional[int] = None
     force: bool = False
+
+
+class CurationFullRunRequest(BaseModel):
+    hours: int = Field(24, ge=1, le=168)
+    force: bool = True
+    include_scrape: bool = True
+    all_accounts: bool = True
+    usernames: Optional[List[str]] = None
+    max_total_posts: Optional[int] = Field(None, ge=1, le=1000)
 
 
 class BatchScrapeItem(BaseModel):
@@ -2148,6 +2325,68 @@ def admin_run_curation(
         return {"status": "ok", "run": run_result, "auto_publish": auto_pub_result}
     finally:
         conn.close()
+
+
+@app.post("/admin/api/curation/full-run")
+async def admin_curation_full_run(
+    payload: CurationFullRunRequest,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    active_job_id = _running_full_run_job_id()
+    if active_job_id:
+        job = FULL_RUN_JOBS.get(active_job_id, {})
+        return {
+            "status": "already_running",
+            "job_id": active_job_id,
+            "stage": job.get("stage"),
+            "message": job.get("message"),
+        }
+
+    if not payload.all_accounts and not payload.usernames:
+        raise HTTPException(status_code=400, detail="usernames required when all_accounts=false")
+
+    job_id = secrets.token_hex(8)
+    FULL_RUN_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "queued",
+        "stage": "queued",
+        "message": "queued",
+        "run_id": None,
+        "requested_by": credentials.username,
+        "requested_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+        "steps": [],
+        "payload": payload.model_dump(exclude_none=True),
+    }
+    _add_full_run_step(job_id, "queued", "queued", "ok")
+    asyncio.create_task(_execute_full_run_job(job_id, payload.model_dump(exclude_none=True), credentials.username))
+    return {"status": "started", "job_id": job_id}
+
+
+@app.get("/admin/api/curation/full-run/latest")
+def admin_curation_full_run_latest(
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    active_job_id = _running_full_run_job_id()
+    if active_job_id:
+        return FULL_RUN_JOBS.get(active_job_id)
+    if FULL_RUN_LAST_JOB_ID:
+        return FULL_RUN_JOBS.get(FULL_RUN_LAST_JOB_ID)
+    return {"status": "empty"}
+
+
+@app.get("/admin/api/curation/full-run/{job_id}")
+def admin_curation_full_run_status(
+    job_id: str,
+    credentials: HTTPBasicCredentials = Depends(security),
+):
+    _require_admin(credentials)
+    job = FULL_RUN_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 
 @app.post("/admin/api/curation/stage1/list")

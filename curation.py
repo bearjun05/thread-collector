@@ -2269,24 +2269,67 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
     ch_title = "AI Curated Daily Digest"
     ch_link = "https://thread-collector.jotto.in/admin/curation"
     ch_desc = "Daily digest curated from top AI threads"
-    digest_title = f"{dt.strftime('%m.%d')} AI 큐레이션 TOP 10"
-    digest_link = ch_link
-    digest_body = _digest_body(items)
-    digest_desc = "Daily curated digest"
-    digest_media_urls = _digest_media_urls(items)
-    digest_thumbnail = digest_media_urls[0] if digest_media_urls else ""
-    digest_desc_html = xml_escape(digest_desc)
-    if digest_thumbnail:
-        digest_desc_html = f"<img src=\"{xml_escape(digest_thumbnail)}\" /><br/>{digest_desc_html}"
-    digest_enclosures = build_enclosures(digest_media_urls)
-    digest_media_contents = build_media_contents(digest_media_urls)
-    digest_media_thumbnail = (
-        f"<media:thumbnail url=\"{xml_escape(digest_thumbnail)}\" />" if digest_thumbnail else ""
-    )
-    digest_media_players = build_media_players(_digest_youtube_embeds(items))
-    pub_date = format_datetime(_parse_dt(publication.get("published_at")) or datetime.now(UTC))
-    last_modified = pub_date
-    digest_guid = f"digest-{publication.get('id')}-{_guid_version(digest_body, digest_media_urls)}"
+    rss_items: List[str] = []
+    last_modified: Optional[str] = None
+    for index, it in enumerate(items[:10], start=1):
+        position = int(it.get("position") or index)
+        created_dt = _parse_dt(it.get("created_at")) or _parse_dt(publication.get("published_at")) or datetime.now(UTC)
+        if not last_modified:
+            last_modified = format_datetime(created_dt)
+        kst = _to_kst(created_dt)
+        dt_text = kst.strftime("%m.%d %H:%M (KST)") if kst else ""
+
+        title_raw = str(it.get("title") or "").strip()
+        title_clean = _clean_publication_title(title_raw) or title_raw or "큐레이션 항목"
+        display_title = f'{position}. "{title_clean}"'
+        summary_raw = _strip_digest_summary_heading(str(it.get("summary") or "").strip(), title_clean, position)
+        summary = str(summary_raw or "").strip()
+        url = str(it.get("url") or "").strip()
+        image_url = str(it.get("image_url") or "").strip()
+        media_urls = [image_url] if image_url else []
+
+        desc_parts: List[str] = []
+        if summary:
+            desc_parts.append(summary)
+        if dt_text:
+            desc_parts.append(dt_text)
+        desc_html = build_description_html("\n".join(desc_parts), [])
+
+        content_parts: List[str] = []
+        if image_url:
+            content_parts.append(f"<img src=\"{xml_escape(image_url)}\" />")
+        if summary:
+            content_parts.append(f"<p>{xml_escape(summary)}</p>")
+        if url:
+            safe_url = xml_escape(url)
+            content_parts.append(f"<p><a href=\"{safe_url}\">{safe_url}</a></p>")
+        if dt_text:
+            content_parts.append(f"<p>{xml_escape(dt_text)}</p>")
+        content_html = "".join(content_parts)
+
+        youtube_embeds = collect_youtube_embeds(summary, [])
+        guid = (
+            f"digest-{publication.get('id')}-{position}-{it.get('post_id') or position}-"
+            f"{_guid_version(title_clean, summary, image_url)}"
+        )
+        enclosures = build_enclosures(media_urls)
+        media_contents = build_media_contents(media_urls)
+        media_thumbnail = f"<media:thumbnail url=\"{xml_escape(image_url)}\" />" if image_url else ""
+        media_players = build_media_players(youtube_embeds)
+
+        rss_items.append(
+            f"<item>"
+            f"<title>{xml_escape(display_title)}</title>"
+            f"<link>{xml_escape(url or ch_link)}</link>"
+            f"<guid>{xml_escape(guid)}</guid>"
+            f"<pubDate>{format_datetime(created_dt)}</pubDate>"
+            f"<description>{desc_html}</description>"
+            f"<content:encoded><![CDATA[{content_html}]]></content:encoded>"
+            f"{media_thumbnail}{enclosures}{media_contents}{media_players}"
+            f"</item>"
+        )
+    if not last_modified:
+        last_modified = format_datetime(_parse_dt(publication.get("published_at")) or datetime.now(UTC))
     xml = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         "<?xml-stylesheet type=\"text/xsl\" href=\"/rss.xsl?v=2\"?>"
@@ -2295,16 +2338,8 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
         f"<title>{xml_escape(ch_title)}</title>"
         f"<link>{xml_escape(ch_link)}</link>"
         f"<description>{xml_escape(ch_desc)}</description>"
-        "<item>"
-        f"<title>{xml_escape(digest_title)}</title>"
-        f"<link>{xml_escape(digest_link)}</link>"
-        f"<guid>{xml_escape(digest_guid)}</guid>"
-        f"<pubDate>{pub_date}</pubDate>"
-        f"<description><![CDATA[{digest_desc_html}]]></description>"
-        f"<content:encoded><![CDATA[{digest_body}]]></content:encoded>"
-        f"{digest_media_thumbnail}{digest_enclosures}{digest_media_contents}{digest_media_players}"
-        "</item>"
-        "</channel></rss>"
+        + "".join(rss_items)
+        + "</channel></rss>"
     )
     return xml, hashlib.sha256(xml.encode("utf-8")).hexdigest(), last_modified
 

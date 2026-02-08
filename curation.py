@@ -333,36 +333,31 @@ def _extract_roots_with_replies(
     use_scraped_window: bool = False,
 ) -> List[Dict[str, Any]]:
     cutoff = datetime.now(UTC) - timedelta(hours=hours)
+    where_clauses = [
+        "p.is_reply = 0",
+        "p.created_at IS NOT NULL",
+        "p.created_at >= ?",
+    ]
+    params: List[Any] = [cutoff.isoformat()]
     if scraped_since:
         if scraped_since.tzinfo is None:
             scraped_since = scraped_since.replace(tzinfo=UTC)
         else:
             scraped_since = scraped_since.astimezone(UTC)
-        roots = conn.execute(
-            "SELECT p.post_id, p.source_id, s.username, p.url, p.text, p.media_json, p.created_at, p.scraped_at "
-            "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
-            "WHERE p.is_reply = 0 AND p.scraped_at >= ? ORDER BY p.created_at DESC LIMIT 2000",
-            (scraped_since.isoformat(),),
-        ).fetchall()
+        where_clauses.append("p.scraped_at >= ?")
+        params.append(scraped_since.isoformat())
     elif use_scraped_window:
-        roots = conn.execute(
-            "SELECT p.post_id, p.source_id, s.username, p.url, p.text, p.media_json, p.created_at, p.scraped_at "
-            "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
-            "WHERE p.is_reply = 0 AND p.scraped_at >= ? ORDER BY p.created_at DESC LIMIT 2000",
-            (cutoff.isoformat(),),
-        ).fetchall()
-    else:
-        roots = conn.execute(
-            "SELECT p.post_id, p.source_id, s.username, p.url, p.text, p.media_json, p.created_at, p.scraped_at "
-            "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
-            "WHERE p.is_reply = 0 ORDER BY p.created_at DESC LIMIT 2000"
-        ).fetchall()
+        where_clauses.append("p.scraped_at >= ?")
+        params.append(cutoff.isoformat())
+
+    roots = conn.execute(
+        "SELECT p.post_id, p.source_id, s.username, p.url, p.text, p.media_json, p.created_at, p.scraped_at "
+        "FROM posts p JOIN feed_sources s ON s.id = p.source_id "
+        f"WHERE {' AND '.join(where_clauses)} ORDER BY p.created_at DESC LIMIT 2000",
+        tuple(params),
+    ).fetchall()
     out: List[Dict[str, Any]] = []
     for r in roots:
-        if not scraped_since and not use_scraped_window:
-            created = _parse_dt(r[6])
-            if created and created < cutoff:
-                continue
         replies = conn.execute(
             "SELECT text, media_json, created_at FROM posts WHERE source_id = ? AND is_reply = 1 AND parent_post_id = ? ORDER BY created_at ASC",
             (r[1], r[0]),
@@ -1919,12 +1914,10 @@ def publish_run(
             conn.execute("UPDATE curation_candidates SET generated_summary=? WHERE id=?", (summary, cand["id"]))
 
         image_url = (cand["edited_image_url"] or "").strip() or (cand["representative_image_url"] or "")
-        kst = _to_kst(_parse_dt(cand["created_at"]))
-        date_prefix = kst.strftime("%m.%d") if kst else _kst_now().strftime("%m.%d")
         final_title = (cand["edited_title"] or "").strip() or title
         if not final_title:
             final_title = _fallback_title(cand["full_text"])
-        display_title = f'{date_prefix} - "{final_title}"'
+        display_title = _clean_publication_title(final_title) or _fallback_title(cand["full_text"])
         final_summary = (cand["edited_summary"] or "").strip() or summary or _fallback_summary(cand["full_text"])
 
         conn.execute(
@@ -2071,12 +2064,22 @@ def _publication_items(conn, publication_id: int, limit: int) -> List[Dict[str, 
                 "username": r[2],
                 "url": r[3],
                 "created_at": r[4],
-                "title": r[5],
+                "title": _clean_publication_title(r[5] or ""),
                 "summary": r[6],
                 "image_url": r[7],
             }
         )
     return out
+
+
+def _clean_publication_title(value: str) -> str:
+    text = str(value or "").strip()
+    text = text.replace("“", "\"").replace("”", "\"").replace("’", "'")
+    text = re.sub(r"^\s*\d{2}\.\d{2}\s*-\s*", "", text)
+    text = re.sub(r"^\s*\d{1,3}\s*[\.\)]\s+", "", text)
+    while len(text) >= 2 and text[0] in "\"'" and text[-1] == text[0]:
+        text = text[1:-1].strip()
+    return " ".join(text.split()).strip()
 
 
 def _digest_body(items: List[Dict[str, Any]]) -> str:
@@ -2088,8 +2091,9 @@ def _digest_body(items: List[Dict[str, Any]]) -> str:
         dt_text = kst.strftime("%m.%d %H:%M (KST)") if kst else ""
         position = int(it.get("position") or (index + 1))
         title_raw = str(it.get("title") or "").strip()
-        summary_raw = _strip_digest_summary_heading(str(it.get("summary") or "").strip(), title_raw, position)
-        title = xml_escape(title_raw)
+        title_clean = _clean_publication_title(title_raw) or title_raw
+        summary_raw = _strip_digest_summary_heading(str(it.get("summary") or "").strip(), title_clean, position)
+        title = xml_escape(title_clean)
         summary = xml_escape(summary_raw)
         url = xml_escape(it.get("url") or "")
         image_url = (it.get("image_url") or "").strip()
@@ -2116,7 +2120,7 @@ def _normalize_digest_line(value: str) -> str:
 
 
 def _canonical_digest_heading(value: str) -> str:
-    text = _normalize_digest_line(value)
+    text = _normalize_digest_line(_clean_publication_title(value))
     text = re.sub(r"^\s*\d+\s*[\.\)]\s*", "", text)
     # remove wrapping quotes repeatedly
     while len(text) >= 2 and text.startswith("\"") and text.endswith("\""):

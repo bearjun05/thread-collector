@@ -325,6 +325,18 @@
       background: #fceeee;
       color: #7d2121;
     }
+    .live-progress-log {
+      border: 1px solid var(--border);
+      background: #fffef8;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.45;
+      max-height: 150px;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
     .published-list {
       display: flex;
       flex-direction: column;
@@ -435,6 +447,7 @@
             <div id="stepMeta5" class="step-meta">publish cost: -</div>
           </div>
         </div>
+        <div id="liveProgressLog" class="live-progress-log" style="margin:6px 0 8px;">live progress will appear here</div>
         <div class="cost-bar">
           <span id="liveStage" class="cost-chip">Live: idle</span>
           <span id="runState" class="cost-chip">Run state: -</span>
@@ -533,6 +546,7 @@
   </div>
 
   <script>
+    const RUN_ID_STORAGE_KEY = "curation:lastRunId";
     let currentRunId = null;
     let candidates = [];
     let dragSourceId = null;
@@ -540,6 +554,7 @@
     const markedForRemove = new Set();
     let runStatusPollTimer = null;
     let activeStage = null;
+    const liveProgressLines = [];
 
     async function api(path, options = {}) {
       const res = await fetch(path, options);
@@ -555,6 +570,17 @@
       document.getElementById("status").textContent = text;
     }
 
+    function appendLiveProgress(text) {
+      const msg = `[${new Date().toLocaleTimeString()}] ${text}`;
+      liveProgressLines.push(msg);
+      while (liveProgressLines.length > 12) liveProgressLines.shift();
+      const el = document.getElementById("liveProgressLog");
+      if (el) {
+        el.textContent = liveProgressLines.join("\n");
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+
     function setRunId(id) {
       const next = id ? Number(id) : null;
       if (currentRunId && next && currentRunId !== next) {
@@ -562,12 +588,40 @@
       }
       currentRunId = next;
       document.getElementById("runId").value = currentRunId || "";
+      try {
+        if (currentRunId) {
+          localStorage.setItem(RUN_ID_STORAGE_KEY, String(currentRunId));
+        } else {
+          localStorage.removeItem(RUN_ID_STORAGE_KEY);
+        }
+      } catch (_) {}
     }
 
     function parseRunId() {
-      const v = Number(document.getElementById("runId").value || 0);
+      const direct = Number(document.getElementById("runId").value || 0);
+      const v = direct || Number(currentRunId || 0);
       if (!v) throw new Error("run_id required");
+      if (v !== currentRunId) setRunId(v);
       return v;
+    }
+
+    async function resolveInitialRunId() {
+      const query = new URLSearchParams(window.location.search);
+      const queryRunId = Number(query.get("run_id") || 0);
+      if (queryRunId > 0) return queryRunId;
+      try {
+        const saved = Number(localStorage.getItem(RUN_ID_STORAGE_KEY) || 0);
+        if (saved > 0) return saved;
+      } catch (_) {}
+      try {
+        const res = await api("/admin/api/curation/runs?limit=1");
+        const data = await res.json();
+        const runs = Array.isArray(data.runs) ? data.runs : [];
+        if (runs.length && Number(runs[0].id || 0) > 0) {
+          return Number(runs[0].id);
+        }
+      } catch (_) {}
+      return null;
     }
 
     function formatUsd(v) {
@@ -680,6 +734,7 @@
       activeStage = null;
       setLiveStage("idle", false);
       setStageButtonsBusy(false);
+      appendLiveProgress("polling stopped");
     }
 
     function startRunStatusPolling(runId, stageNo) {
@@ -687,6 +742,7 @@
       activeStage = stageNo || null;
       setLiveStage(`stage${stageNo} running`, true);
       setStageButtonsBusy(true);
+      appendLiveProgress(`stage${stageNo} started (run_id=${runId})`);
       runStatusPollTimer = setInterval(() => {
         checkRunStatus(runId, true);
       }, 1500);
@@ -706,6 +762,9 @@
             `run spend: ${formatUsd(data.run_total_spend_usd || 0)}`,
           ]);
           setLiveStage(`stage3 running (${formatInt(data.summarized_candidates || 0)}/${formatInt(data.total_candidates || 0)})`, true);
+          appendLiveProgress(
+            `stage3 progress: summary ${formatInt(data.summarized_candidates || 0)}/${formatInt(data.total_candidates || 0)}, score ${formatInt(data.scored_candidates || 0)}/${formatInt(data.total_candidates || 0)}, spend ${formatUsd(data.run_total_spend_usd || 0)}`
+          );
         }
         if ((data.status || "") === "running" && activeStage === 2) {
           setStepMeta(2, [
@@ -714,6 +773,9 @@
             `run spend: ${formatUsd(data.run_total_spend_usd || 0)}`,
           ]);
           setLiveStage(`stage2 running (${formatInt(data.scored_candidates || 0)}/${formatInt(data.total_candidates || 0)})`, true);
+          appendLiveProgress(
+            `stage2 progress: score ${formatInt(data.scored_candidates || 0)}/${formatInt(data.total_candidates || 0)}, spend ${formatUsd(data.run_total_spend_usd || 0)}`
+          );
         }
         if (!silent) {
           setStatus(
@@ -721,10 +783,12 @@
           );
         }
         if ((data.status || "") !== "running") {
+          appendLiveProgress(`run status=${data.status || "-"} (run_id=${targetRunId})`);
           stopRunStatusPolling();
         }
       } catch (e) {
         if (!silent) setStatus(`run status failed: ${String(e)}`);
+        appendLiveProgress(`run status check failed: ${String(e)}`);
       }
     }
 
@@ -996,6 +1060,7 @@
       try {
         stopRunStatusPolling();
         setStatus("stage1 listing...");
+        appendLiveProgress("stage1 requested");
         const hours = Number(document.getElementById("hours").value || 24);
         const res = await api("/admin/api/curation/stage1/list", {
           method: "POST",
@@ -1017,10 +1082,12 @@
           `stage1 done (run_id=${data.run_id}, candidates=${data.candidates || 0}, ` +
           `root_total=${d.root_total ?? "-"}, created_win=${d.root_by_created_window ?? "-"}, scraped_win=${d.root_by_scraped_window ?? "-"})`
         );
+        appendLiveProgress(`stage1 done: candidates=${formatInt(data.candidates || 0)} run_id=${data.run_id}`);
         await checkRunStatus(data.run_id, true);
         await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
+        appendLiveProgress(`stage1 failed: ${String(e)}`);
       }
     }
 
@@ -1030,6 +1097,7 @@
         run_id = parseRunId();
         startRunStatusPolling(run_id, 2);
         setStatus("stage2 scoring...");
+        appendLiveProgress(`stage2 requested (run_id=${run_id})`);
         await checkRunStatus(run_id, true);
         const res = await api("/admin/api/curation/stage2/score", {
           method: "POST",
@@ -1047,10 +1115,12 @@
         ]);
         await reloadCandidates();
         setStatus("stage2 done");
+        appendLiveProgress(`stage2 done: scored=${formatInt(data.scored || 0)} llm_eval=${formatInt(data.llm_eval_count || 0)} cost=${formatUsd(data.stage_cost_usd || 0)}`);
         await checkRunStatus(run_id, true);
         await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
+        appendLiveProgress(`stage2 failed: ${String(e)}`);
       } finally {
         stopRunStatusPolling();
       }
@@ -1062,6 +1132,7 @@
         run_id = parseRunId();
         startRunStatusPolling(run_id, 3);
         setStatus("stage3 summarizing...");
+        appendLiveProgress(`stage3 requested (run_id=${run_id})`);
         await checkRunStatus(run_id, true);
         const res = await api("/admin/api/curation/stage3/summarize", {
           method: "POST",
@@ -1078,10 +1149,12 @@
         ]);
         await reloadCandidates();
         setStatus("stage3 done");
+        appendLiveProgress(`stage3 done: updated=${formatInt(data.updated || 0)} cost=${formatUsd(data.stage_cost_usd || 0)}`);
         await checkRunStatus(run_id, true);
         await refreshCostStats();
       } catch (e) {
         setStatus(String(e));
+        appendLiveProgress(`stage3 failed: ${String(e)}`);
       } finally {
         stopRunStatusPolling();
       }
@@ -1158,7 +1231,15 @@
     }
 
     async function reloadCandidates() {
-      const run_id = parseRunId();
+      const run_id = Number(document.getElementById("runId").value || currentRunId || 0);
+      if (!run_id) {
+        candidates = [];
+        renderRows();
+        updateRemoveMeta();
+        setStatus("no run selected");
+        return;
+      }
+      setRunId(run_id);
       const res = await api(`/admin/api/curation/candidates?run_id=${run_id}`);
       const data = await res.json();
       setRunId(data.run_id);
@@ -1369,10 +1450,23 @@
       await refreshCostStats();
       await loadPublishedView();
       try {
-        const maybeRunId = Number(document.getElementById("runId").value || 0);
-        if (maybeRunId) await checkRunStatus(maybeRunId, true);
+        const initialRunId = await resolveInitialRunId();
+        if (initialRunId) {
+          setRunId(initialRunId);
+          await reloadCandidates();
+          await checkRunStatus(initialRunId, true);
+          setStatus(`restored run_id=${initialRunId}`);
+        } else {
+          setStatus("ready (no run yet)");
+        }
       } catch (_) {}
-      setStatus("ready");
+      const runInput = document.getElementById("runId");
+      if (runInput) {
+        runInput.addEventListener("change", () => {
+          const v = Number(runInput.value || 0);
+          if (v > 0) setRunId(v);
+        });
+      }
     }
 
     init();

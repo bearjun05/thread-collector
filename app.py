@@ -6,7 +6,7 @@ import os
 import secrets
 import sqlite3
 import traceback
-from email.utils import format_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 import hashlib
 import subprocess
 import urllib.parse
@@ -193,6 +193,21 @@ def _append_log(message: str) -> None:
             f.write(line)
     except Exception:
         pass
+
+
+def _ims_not_modified(ims_value: Optional[str], last_modified_value: Optional[str]) -> bool:
+    if not ims_value or not last_modified_value:
+        return False
+    try:
+        ims_dt = parsedate_to_datetime(ims_value)
+        lm_dt = parsedate_to_datetime(last_modified_value)
+        if ims_dt.tzinfo is None:
+            ims_dt = ims_dt.replace(tzinfo=timezone.utc)
+        if lm_dt.tzinfo is None:
+            lm_dt = lm_dt.replace(tzinfo=timezone.utc)
+        return ims_dt >= lm_dt
+    except Exception:
+        return ims_value == last_modified_value
 
 
 def _get_schedule(conn: sqlite3.Connection, display_kst: bool = True) -> Dict[str, Any]:
@@ -1381,10 +1396,11 @@ def rss_feed(
             if cache_ok:
                 inm = request.headers.get("if-none-match")
                 ims = request.headers.get("if-modified-since")
-                if inm and inm == cached_etag:
-                    _log_token_request(conn, token_id, username, request, 304)
-                    return PlainTextResponse("", status_code=304)
-                if ims and cached_last and ims == cached_last:
+                if inm is not None:
+                    if cached_etag and inm == cached_etag:
+                        _log_token_request(conn, token_id, username, request, 304)
+                        return PlainTextResponse("", status_code=304)
+                elif _ims_not_modified(ims, cached_last):
                     _log_token_request(conn, token_id, username, request, 304)
                     return PlainTextResponse("", status_code=304)
                 headers = {"ETag": cached_etag}
@@ -1421,10 +1437,11 @@ def rss_feed(
                 last_modified = None
         inm = request.headers.get("if-none-match")
         ims = request.headers.get("if-modified-since")
-        if inm and inm == etag:
-            _log_token_request(conn, token_id, username, request, 304)
-            return PlainTextResponse("", status_code=304)
-        if ims and last_modified and ims == last_modified:
+        if inm is not None:
+            if etag and inm == etag:
+                _log_token_request(conn, token_id, username, request, 304)
+                return PlainTextResponse("", status_code=304)
+        elif _ims_not_modified(ims, last_modified):
             _log_token_request(conn, token_id, username, request, 304)
             return PlainTextResponse("", status_code=304)
 
@@ -1514,10 +1531,11 @@ def _serve_curated_feed(
 
         inm = request.headers.get("if-none-match")
         ims = request.headers.get("if-modified-since")
-        if inm and etag and inm == etag:
-            _log_token_request(conn, token_id, "curated", request, 304)
-            return PlainTextResponse("", status_code=304)
-        if ims and last_modified and ims == last_modified:
+        if inm is not None:
+            if etag and inm == etag:
+                _log_token_request(conn, token_id, "curated", request, 304)
+                return PlainTextResponse("", status_code=304)
+        elif _ims_not_modified(ims, last_modified):
             _log_token_request(conn, token_id, "curated", request, 304)
             return PlainTextResponse("", status_code=304)
 

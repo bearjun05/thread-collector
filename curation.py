@@ -2313,6 +2313,9 @@ def build_feed_xml(conn, feed_type: str, limit: int = 10) -> Tuple[str, str, Opt
 
 def refresh_cache(conn, feed_type: str, limit: int = 10) -> Dict[str, Any]:
     xml, etag, last_modified = build_feed_xml(conn, feed_type, limit)
+    # Use cache refresh time for Last-Modified so IMS-only readers can pick up
+    # regenerated XML even when publication timestamp is unchanged.
+    last_modified = format_datetime(datetime.now(UTC))
     now = datetime.now(UTC).isoformat()
     conn.execute(
         "INSERT OR REPLACE INTO curated_rss_cache (feed_type, limit_count, etag, last_modified, xml, updated_at) "

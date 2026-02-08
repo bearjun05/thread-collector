@@ -1557,7 +1557,7 @@ def _serve_curated_feed(
         conn.close()
 
 
-@app.api_route("/v2/rss/curated", methods=["GET", "HEAD"])
+@app.api_route("/v3/rss/curated", methods=["GET", "HEAD"])
 def rss_curated_feed(
     request: Request,
     token: str = Query(..., description="Curated RSS token (scope=curated/global)"),
@@ -1566,7 +1566,7 @@ def rss_curated_feed(
     return _serve_curated_feed(request, token, CURATED_ITEM_FEED, limit)
 
 
-@app.api_route("/v2/rss/curated/digest", methods=["GET", "HEAD"])
+@app.api_route("/v3/rss/curated/digest", methods=["GET", "HEAD"])
 def rss_curated_digest(
     request: Request,
     token: str = Query(..., description="Curated RSS token (scope=curated/global)"),
@@ -1586,8 +1586,8 @@ async def root():
             "POST /v2/scrape": "🧼 새 응답 형식 - 단일 계정 스크래핑",
             "POST /v2/batch-scrape": "🧼 새 응답 형식 - 배치 스크래핑",
             "GET /v2/rss": "🧾 계정별 RSS 피드 (token 필요)",
-            "GET /v2/rss/curated": "🧠 AI 큐레이션 RSS (10개 item)",
-            "GET /v2/rss/curated/digest": "🧠 AI 큐레이션 Digest RSS (1개 item)",
+            "GET /v3/rss/curated": "🧠 AI 큐레이션 RSS (10개 item)",
+            "GET /v3/rss/curated/digest": "🧠 AI 큐레이션 Digest RSS (1개 item)",
             "GET /admin": "🔐 관리자 UI",
             "GET /admin/curation": "🔐 큐레이션 승인/발행 UI",
             "GET /search-users": "사용자 검색 (자동완성)",
@@ -2661,8 +2661,8 @@ def admin_curation_publication(
     try:
         publication = curation_latest_publication(conn, item_limit=item_limit)
         base = str(request.base_url).rstrip("/")
-        item_path = "/v2/rss/curated"
-        digest_path = "/v2/rss/curated/digest"
+        item_path = "/v3/rss/curated"
+        digest_path = "/v3/rss/curated/digest"
         token_row = conn.execute(
             "SELECT token, scope FROM tokens "
             "WHERE is_active = 1 AND scope IN ('curated', 'global', '*') "

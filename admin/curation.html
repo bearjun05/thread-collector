@@ -1235,14 +1235,14 @@
           itemLink.textContent = `RSS Item Feed: ${links.item_url}`;
           itemLink.href = links.item_url;
         } else {
-          itemLink.textContent = `RSS Item Feed: token required (${links.item_url_no_token || "/v2/rss/curated"})`;
+          itemLink.textContent = `RSS Item Feed: token required (${links.item_url_no_token || "/v3/rss/curated"})`;
           itemLink.removeAttribute("href");
         }
         if (links.digest_url) {
           digestLink.textContent = `RSS Digest Feed: ${links.digest_url}`;
           digestLink.href = links.digest_url;
         } else {
-          digestLink.textContent = `RSS Digest Feed: token required (${links.digest_url_no_token || "/v2/rss/curated/digest"})`;
+          digestLink.textContent = `RSS Digest Feed: token required (${links.digest_url_no_token || "/v3/rss/curated/digest"})`;
           digestLink.removeAttribute("href");
         }
 

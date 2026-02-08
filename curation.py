@@ -2195,6 +2195,11 @@ def _digest_youtube_embeds(items: List[Dict[str, Any]]) -> List[str]:
     return embeds
 
 
+def _guid_version(*parts: Any) -> str:
+    base = "|".join(str(p or "") for p in parts)
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
+
+
 def _build_item_feed_xml(publication: Dict[str, Any], items: List[Dict[str, Any]], limit: int) -> Tuple[str, str, Optional[str]]:
     ch_title = "AI Curated Threads Feed"
     ch_link = "https://thread-collector.jotto.in/admin/curation"
@@ -2226,11 +2231,15 @@ def _build_item_feed_xml(publication: Dict[str, Any], items: List[Dict[str, Any]
         media = build_media_contents([image_url] if image_url else [])
         media_thumb = f"<media:thumbnail url=\"{xml_escape(image_url)}\" />" if image_url else ""
         players = build_media_players(youtube_embeds)
+        guid = (
+            f"curated-{publication.get('id')}-{it.get('position')}-{it.get('post_id')}-"
+            f"{_guid_version(it.get('title'), summary, image_url)}"
+        )
         rss_items.append(
             f"<item>"
             f"<title>{xml_escape(it.get('title') or '')}</title>"
             f"<link>{xml_escape(it.get('url') or '')}</link>"
-            f"<guid>{xml_escape(f'curated-{publication['id']}-{it.get('position')}-{it.get('post_id')}')}</guid>"
+            f"<guid>{xml_escape(guid)}</guid>"
             f"<pubDate>{pub}</pubDate>"
             f"<description>{desc}</description>"
             f"<content:encoded><![CDATA[{content_html}]]></content:encoded>"
@@ -2273,6 +2282,7 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
     digest_media_players = build_media_players(_digest_youtube_embeds(items))
     pub_date = format_datetime(_parse_dt(publication.get("published_at")) or datetime.now(UTC))
     last_modified = pub_date
+    digest_guid = f"digest-{publication.get('id')}-{_guid_version(digest_body, digest_media_urls)}"
     xml = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         "<?xml-stylesheet type=\"text/xsl\" href=\"/rss.xsl?v=2\"?>"
@@ -2284,7 +2294,7 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
         "<item>"
         f"<title>{xml_escape(digest_title)}</title>"
         f"<link>{xml_escape(digest_link)}</link>"
-        f"<guid>{xml_escape(f'digest-{publication['id']}')}</guid>"
+        f"<guid>{xml_escape(digest_guid)}</guid>"
         f"<pubDate>{pub_date}</pubDate>"
         f"<description><![CDATA[{digest_desc_html}]]></description>"
         f"<content:encoded><![CDATA[{digest_body}]]></content:encoded>"

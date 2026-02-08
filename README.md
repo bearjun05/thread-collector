@@ -287,8 +287,8 @@ curl -X POST "http://localhost:8001/v2/scrape" \
 
 큐레이션은 관리자 승인 기반(반자동)이며 RSS는 2종을 제공합니다.
 
-- 개별 아이템 피드: `GET /v2/rss/curated?token=...&limit=10`
-- Digest 피드: `GET /v2/rss/curated/digest?token=...`
+- 개별 아이템 피드: `GET /v3/rss/curated?token=...&limit=10`
+- Digest 피드: `GET /v3/rss/curated/digest?token=...`
 
 토큰 정책:
 - `scope=curated` 또는 `scope=global` 토큰으로 접근 가능

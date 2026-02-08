@@ -2220,8 +2220,11 @@ def _build_item_feed_xml(publication: Dict[str, Any], items: List[Dict[str, Any]
             content_blocks=content_blocks,
         )
         desc = build_description_html(summary, [])
+        if image_url:
+            desc = f"<img src=\"{xml_escape(image_url)}\" /><br/>{desc}"
         enclosures = build_enclosures([image_url] if image_url else [])
         media = build_media_contents([image_url] if image_url else [])
+        media_thumb = f"<media:thumbnail url=\"{xml_escape(image_url)}\" />" if image_url else ""
         players = build_media_players(youtube_embeds)
         rss_items.append(
             f"<item>"
@@ -2231,7 +2234,7 @@ def _build_item_feed_xml(publication: Dict[str, Any], items: List[Dict[str, Any]
             f"<pubDate>{pub}</pubDate>"
             f"<description>{desc}</description>"
             f"<content:encoded><![CDATA[{content_html}]]></content:encoded>"
-            f"{enclosures}{media}{players}"
+            f"{media_thumb}{enclosures}{media}{players}"
             f"</item>"
         )
     xml = (
@@ -2258,8 +2261,15 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
     digest_body = _digest_body(items)
     digest_desc = "Daily curated digest"
     digest_media_urls = _digest_media_urls(items)
+    digest_thumbnail = digest_media_urls[0] if digest_media_urls else ""
+    digest_desc_html = xml_escape(digest_desc)
+    if digest_thumbnail:
+        digest_desc_html = f"<img src=\"{xml_escape(digest_thumbnail)}\" /><br/>{digest_desc_html}"
     digest_enclosures = build_enclosures(digest_media_urls)
     digest_media_contents = build_media_contents(digest_media_urls)
+    digest_media_thumbnail = (
+        f"<media:thumbnail url=\"{xml_escape(digest_thumbnail)}\" />" if digest_thumbnail else ""
+    )
     digest_media_players = build_media_players(_digest_youtube_embeds(items))
     pub_date = format_datetime(_parse_dt(publication.get("published_at")) or datetime.now(UTC))
     last_modified = pub_date
@@ -2276,9 +2286,9 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
         f"<link>{xml_escape(digest_link)}</link>"
         f"<guid>{xml_escape(f'digest-{publication['id']}')}</guid>"
         f"<pubDate>{pub_date}</pubDate>"
-        f"<description>{xml_escape(digest_desc)}</description>"
+        f"<description><![CDATA[{digest_desc_html}]]></description>"
         f"<content:encoded><![CDATA[{digest_body}]]></content:encoded>"
-        f"{digest_enclosures}{digest_media_contents}{digest_media_players}"
+        f"{digest_media_thumbnail}{digest_enclosures}{digest_media_contents}{digest_media_players}"
         "</item>"
         "</channel></rss>"
     )

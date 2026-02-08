@@ -549,12 +549,27 @@ async def run_once(usernames: Optional[List[str]] = None, max_total_posts: Optio
         try:
             # Trigger curation immediately after scrape run. run_curation_once handles
             # same-day deduplication and will skip when already generated.
-            curation_run_once(conn, force=False, scraped_since=started_at, logger=_log)
+            run_result = curation_run_once(conn, force=False, scraped_since=started_at, logger=_log)
+            if isinstance(run_result, dict):
+                _log(
+                    "[curation] run_once result "
+                    f"status={run_result.get('status')} "
+                    f"reason={run_result.get('reason')} "
+                    f"run_id={run_result.get('run_id')}"
+                )
             pub = curation_maybe_auto_publish_due(conn, logger=_log)
             if pub:
                 refresh_curated_cache(conn, CURATED_ITEM_FEED, limit=10)
                 refresh_curated_cache(conn, CURATED_DIGEST_FEED, limit=10)
                 _log("[curation] refreshed curated RSS cache after publish")
+                if isinstance(pub, dict):
+                    _log(
+                        "[curation] auto publish result "
+                        f"publication_id={pub.get('publication_id')} "
+                        f"item_count={pub.get('item_count')}"
+                    )
+            else:
+                _log("[curation] auto publish skipped (no due run)")
         except Exception as curation_err:
             _log(f"[curation] scheduler hook failed: {type(curation_err).__name__}: {curation_err}")
         duration = int((datetime.now(timezone.utc) - started_at).total_seconds())

@@ -363,8 +363,16 @@ async def _scheduler_loop() -> None:
             if not due:
                 continue
             if lock.locked():
+                _append_log("[scheduler] due but previous run is still in progress; skip this tick")
                 continue
             async with lock:
+                due_at_text = prev_due.isoformat() if prev_due else "unknown"
+                _append_log(
+                    "[scheduler] auto run triggered "
+                    f"due_at_utc={due_at_text} "
+                    f"interval_minutes={sched.get('interval_minutes')} "
+                    f"start_time_utc={sched.get('start_time_utc')}"
+                )
                 await rss_run_once(None)
                 conn = _get_db_conn()
                 now_iso = datetime.now(timezone.utc).isoformat()
@@ -374,7 +382,9 @@ async def _scheduler_loop() -> None:
                 )
                 conn.commit()
                 conn.close()
-        except Exception:
+                _append_log(f"[scheduler] auto run completed last_run_at={now_iso}")
+        except Exception as e:
+            _append_log(f"[scheduler] auto run failed: {type(e).__name__}: {e}")
             continue
 
 
@@ -1032,7 +1042,10 @@ def build_v2_data_from_result(
 @app.on_event("startup")
 async def on_startup():
     if os.environ.get("ENABLE_INTERNAL_SCHEDULER") == "1":
+        _append_log("[scheduler] internal scheduler enabled (ENABLE_INTERNAL_SCHEDULER=1)")
         asyncio.create_task(_scheduler_loop())
+    else:
+        _append_log("[scheduler] internal scheduler disabled (ENABLE_INTERNAL_SCHEDULER!=1)")
 
 
 @app.get("/v2/rss")

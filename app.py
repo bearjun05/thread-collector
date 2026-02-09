@@ -87,6 +87,17 @@ security = HTTPBasic()
 FULL_RUN_JOBS: Dict[str, Dict[str, Any]] = {}
 FULL_RUN_LAST_JOB_ID: Optional[str] = None
 FULL_RUN_MUTEX = asyncio.Lock()
+AUTO_PUBLISH_MUTEX = asyncio.Lock()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.environ.get(name, default)).strip())
+    except Exception:
+        return default
+
+
+AUTO_PUBLISH_POLL_SECONDS = max(15, min(3600, _env_int("AUTO_PUBLISH_POLL_SECONDS", 30)))
 
 
 def _require_admin(credentials: HTTPBasicCredentials) -> None:
@@ -405,6 +416,33 @@ async def _scheduler_loop() -> None:
         except Exception as e:
             _append_log(f"[scheduler] auto run failed: {type(e).__name__}: {e}")
             continue
+
+
+async def _auto_publish_loop() -> None:
+    while True:
+        try:
+            if AUTO_PUBLISH_MUTEX.locked():
+                await asyncio.sleep(1)
+                continue
+            async with AUTO_PUBLISH_MUTEX:
+                conn = _get_db_conn()
+                try:
+                    pub = curation_maybe_auto_publish_due(conn, logger=_append_log)
+                    if pub:
+                        curation_refresh_cache(conn, CURATED_ITEM_FEED, 10)
+                        curation_refresh_cache(conn, CURATED_DIGEST_FEED, 10)
+                        _append_log("[curation] auto publish watcher refreshed cache")
+                        if isinstance(pub, dict):
+                            _append_log(
+                                "[curation] auto publish watcher result "
+                                f"publication_id={pub.get('publication_id')} "
+                                f"item_count={pub.get('item_count')}"
+                            )
+                finally:
+                    conn.close()
+        except Exception as e:
+            _append_log(f"[curation] auto publish watcher failed: {type(e).__name__}: {e}")
+        await asyncio.sleep(AUTO_PUBLISH_POLL_SECONDS)
 
 
 def _running_full_run_job_id() -> Optional[str]:
@@ -1233,6 +1271,14 @@ def build_v2_data_from_result(
 
 @app.on_event("startup")
 async def on_startup():
+    if os.environ.get("ENABLE_AUTO_PUBLISH_WATCHER", "1") == "1":
+        _append_log(
+            "[curation] auto publish watcher enabled "
+            f"(ENABLE_AUTO_PUBLISH_WATCHER=1, poll_seconds={AUTO_PUBLISH_POLL_SECONDS})"
+        )
+        asyncio.create_task(_auto_publish_loop())
+    else:
+        _append_log("[curation] auto publish watcher disabled (ENABLE_AUTO_PUBLISH_WATCHER!=1)")
     if os.environ.get("ENABLE_INTERNAL_SCHEDULER") == "1":
         _append_log("[scheduler] internal scheduler enabled (ENABLE_INTERNAL_SCHEDULER=1)")
         asyncio.create_task(_scheduler_loop())
@@ -1557,13 +1603,50 @@ def _serve_curated_feed(
         conn.close()
 
 
+def _resolve_curated_query_token(
+    request: Request,
+    token: Optional[str],
+    rss_token: Optional[str],
+) -> str:
+    # Some reverse proxies inject/override `token` query params.
+    # Prefer `rss_token` when provided by clients.
+    try:
+        rss_tokens = request.query_params.getlist("rss_token")
+    except Exception:
+        rss_tokens = []
+    for raw in reversed(rss_tokens):
+        val = str(raw or "").strip()
+        if val:
+            return val
+
+    if rss_token:
+        val = str(rss_token).strip()
+        if val:
+            return val
+
+    try:
+        tokens = request.query_params.getlist("token")
+    except Exception:
+        tokens = []
+    for raw in reversed(tokens):
+        val = str(raw or "").strip()
+        if val:
+            return val
+
+    if token:
+        return str(token).strip()
+    return ""
+
+
 @app.api_route("/v3/rss/curated", methods=["GET", "HEAD"])
 def rss_curated_feed(
     request: Request,
-    token: str = Query(..., description="Curated RSS token (scope=curated/global)"),
+    token: Optional[str] = Query(None, description="Curated RSS token (scope=curated/global)"),
+    rss_token: Optional[str] = Query(None, description="Curated RSS token alias (preferred)"),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return _serve_curated_feed(request, token, CURATED_ITEM_FEED, limit)
+    resolved = _resolve_curated_query_token(request, token, rss_token)
+    return _serve_curated_feed(request, resolved, CURATED_ITEM_FEED, limit)
 
 
 @app.api_route("/v3/rss/curated/{token}", methods=["GET", "HEAD"])
@@ -1578,9 +1661,11 @@ def rss_curated_feed_path_token(
 @app.api_route("/v3/rss/curated/digest", methods=["GET", "HEAD"])
 def rss_curated_digest(
     request: Request,
-    token: str = Query(..., description="Curated RSS token (scope=curated/global)"),
+    token: Optional[str] = Query(None, description="Curated RSS token (scope=curated/global)"),
+    rss_token: Optional[str] = Query(None, description="Curated RSS token alias (preferred)"),
 ):
-    return _serve_curated_feed(request, token, CURATED_DIGEST_FEED, 10)
+    resolved = _resolve_curated_query_token(request, token, rss_token)
+    return _serve_curated_feed(request, resolved, CURATED_DIGEST_FEED, 10)
 
 
 @app.api_route("/v3/rss/curated/digest/{token}", methods=["GET", "HEAD"])
@@ -2699,8 +2784,8 @@ def admin_curation_publication(
             token = str(token_row[0])
             links["item_url"] = f"{base}{item_path}/{token}"
             links["digest_url"] = f"{base}{digest_path}/{token}"
-            links["item_url_query"] = f"{base}{item_path}?token={token}"
-            links["digest_url_query"] = f"{base}{digest_path}?token={token}"
+            links["item_url_query"] = f"{base}{item_path}?rss_token={token}"
+            links["digest_url_query"] = f"{base}{digest_path}?rss_token={token}"
         else:
             links["item_url"] = None
             links["digest_url"] = None

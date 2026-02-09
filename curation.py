@@ -2273,8 +2273,10 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
     digest_link = ch_link
     digest_body = _digest_body(items[:10])
     digest_desc = "Daily curated digest"
-    digest_media_urls = _digest_media_urls(items[:10])
-    digest_thumbnail = digest_media_urls[0] if digest_media_urls else ""
+    all_digest_media_urls = _digest_media_urls(items[:10])
+    digest_thumbnail = all_digest_media_urls[0] if all_digest_media_urls else ""
+    # Keep only one primary enclosure for broad RSS reader compatibility.
+    digest_media_urls = [digest_thumbnail] if digest_thumbnail else []
     digest_desc_html = xml_escape(digest_desc)
     if digest_thumbnail:
         digest_desc_html = f"<img src=\"{xml_escape(digest_thumbnail)}\" /><br/>{digest_desc_html}"
@@ -2286,7 +2288,7 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
     digest_media_players = build_media_players(_digest_youtube_embeds(items[:10]))
     pub_date = format_datetime(_parse_dt(publication.get("published_at")) or datetime.now(UTC))
     last_modified = pub_date
-    digest_guid = f"digest-{publication.get('id')}-{_guid_version(digest_body, digest_media_urls)}"
+    digest_guid = f"digest-{publication.get('id')}-{_guid_version(digest_body, all_digest_media_urls)}"
     xml = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
         "<?xml-stylesheet type=\"text/xsl\" href=\"/rss.xsl?v=2\"?>"
@@ -2300,7 +2302,7 @@ def _build_digest_feed_xml(publication: Dict[str, Any], items: List[Dict[str, An
         f"<link>{xml_escape(digest_link)}</link>"
         f"<guid>{xml_escape(digest_guid)}</guid>"
         f"<pubDate>{pub_date}</pubDate>"
-        f"<description><![CDATA[{digest_desc_html}]]></description>"
+        f"<description>{digest_desc_html}</description>"
         f"<content:encoded><![CDATA[{digest_body}]]></content:encoded>"
         f"{digest_media_thumbnail}{digest_enclosures}{digest_media_contents}{digest_media_players}"
         "</item>"
